@@ -132,23 +132,37 @@ def _fallback_stocks() -> List[Dict[str, Any]]:
 # ── yfinance 지표 수집 ────────────────────────
 
 def _fetch_metrics(ticker: str) -> Dict[str, Any]:
-    """yfinance에서 주요 재무 지표 수집."""
-    try:
-        info = yf.Ticker(ticker).info or {}
-        return {
-            "per":            info.get("trailingPE"),
-            "pbr":            info.get("priceToBook"),
-            "profit_margin":  info.get("profitMargins"),
-            "revenue_growth": info.get("revenueGrowth"),
-            "roe":            info.get("returnOnEquity"),
-            "debt_to_equity": info.get("debtToEquity"),
-            "dividend_yield": info.get("dividendYield"),
-            "sector":         info.get("sector", ""),
-            "company_name":   info.get("longName") or info.get("shortName", ""),
-        }
-    except Exception as exc:
-        logger.debug("%s 지표 수집 실패: %s", ticker, exc)
-        return {}
+    """yfinance에서 주요 재무 지표 수집 (타임아웃 15초)."""
+    import threading as _t
+
+    result: Dict[str, Any] = {}
+    exc_holder: list = []
+
+    def _fetch():
+        try:
+            info = yf.Ticker(ticker).info or {}
+            result.update({
+                "per":            info.get("trailingPE"),
+                "pbr":            info.get("priceToBook"),
+                "profit_margin":  info.get("profitMargins"),
+                "revenue_growth": info.get("revenueGrowth"),
+                "roe":            info.get("returnOnEquity"),
+                "debt_to_equity": info.get("debtToEquity"),
+                "dividend_yield": info.get("dividendYield"),
+                "sector":         info.get("sector", ""),
+                "company_name":   info.get("longName") or info.get("shortName", ""),
+            })
+        except Exception as exc:
+            exc_holder.append(exc)
+
+    t = _t.Thread(target=_fetch, daemon=True)
+    t.start()
+    t.join(timeout=15)
+    if not result and not exc_holder:
+        logger.debug("%s yfinance 타임아웃 (15초)", ticker)
+    elif exc_holder:
+        logger.debug("%s 지표 수집 실패: %s", ticker, exc_holder[0])
+    return result
 
 
 # ── 모듈 레벨 싱글톤 ─────────────────────────

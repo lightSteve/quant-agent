@@ -14,8 +14,13 @@ import threading
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-_BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_PATH = os.path.join(_BASE, "sector_analysis.db")
+# Streamlit Cloud: /mount/src/ 는 read-only → /tmp/ 사용
+# 로컬 개발: 프로젝트 루트에 저장
+if os.path.exists("/mount/src"):
+    DB_PATH = "/tmp/sector_analysis.db"
+else:
+    _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    DB_PATH = os.path.join(_BASE, "sector_analysis.db")
 
 _write_lock = threading.Lock()
 

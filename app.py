@@ -1381,7 +1381,7 @@ def render_sector_tab(api_key: str) -> None:  # noqa: C901
     )
 
     # ── 1. 제어 패널 ──────────────────────────
-    col_start, col_reload, col_reset = st.columns([1, 1, 1])
+    col_start, col_reload, col_reset, col_refresh = st.columns([1, 1, 1, 1])
 
     with col_start:
         if not analyzer.is_running():
@@ -1392,7 +1392,7 @@ def render_sector_tab(api_key: str) -> None:  # noqa: C901
                     loaded = analyzer.load_queue()
                     started = analyzer.start(api_key, provider="github")
                     if started:
-                        st.success(f"분석 시작! 신규 종목 {loaded}개 큐 추가")
+                        st.toast(f"분석 시작! 신규 종목 {loaded}개 큐 추가 ✅")
                     else:
                         st.warning("이미 실행 중입니다.")
                     st.rerun()
@@ -1405,7 +1405,8 @@ def render_sector_tab(api_key: str) -> None:  # noqa: C901
         if st.button("🔃 종목 재적재", use_container_width=True,
                      help="KOSPI 종목 목록을 다시 불러와 새 종목만 추가합니다"):
             n = analyzer.load_queue()
-            st.info(f"신규 {n}개 추가됨")
+            st.toast(f"신규 {n}개 추가됨")
+            st.rerun()
 
     with col_reset:
         if st.button("🗑 전체 초기화", use_container_width=True,
@@ -1414,7 +1415,12 @@ def render_sector_tab(api_key: str) -> None:  # noqa: C901
             reset_all()
             if analyzer.is_running():
                 analyzer.stop()
-            st.warning("초기화 완료")
+            st.toast("초기화 완료")
+            st.rerun()
+
+    with col_refresh:
+        if st.button("🔄 새로고침", use_container_width=True,
+                     help="최신 분석 결과를 다시 불러옵니다"):
             st.rerun()
 
     # ── 2. 진행 현황 ──────────────────────────
@@ -1433,11 +1439,26 @@ def render_sector_tab(api_key: str) -> None:  # noqa: C901
 
     if running:
         st.progress(min(analyzed / total, 1.0))
-        if analyzer.current_ticker:
-            st.caption(f"⚙️ 현재 분석 중: `{analyzer.current_ticker}`")
+        status_cols = st.columns([3, 1])
+        with status_cols[0]:
+            if analyzer.current_ticker:
+                st.info(f"⚙️ 현재 분석 중: `{analyzer.current_ticker}` — 약 40초마다 1종목 처리됩니다. **🔄 새로고침** 버튼으로 최신 결과를 확인하세요.")
+            else:
+                st.info("⏳ 다음 종목 대기 중... **🔄 새로고침** 버튼으로 최신 결과를 확인하세요.")
         if analyzer.last_error:
-            st.caption(f"⚠️ 마지막 오류: {analyzer.last_error}")
-        st.info("🔄 분석이 진행 중입니다. 약 40초마다 1종목 처리됩니다. 페이지를 새로고침하면 최신 결과를 볼 수 있습니다.")
+            st.error(f"⚠️ 마지막 오류: `{analyzer.last_error}`")
+
+    # 디버그 정보
+    with st.expander("🔧 디버그 정보", expanded=False):
+        from data.sector_db import DB_PATH
+        import os
+        st.code(
+            f"DB 경로: {DB_PATH}\n"
+            f"DB 파일 존재: {os.path.exists(DB_PATH)}\n"
+            f"워커 실행 중: {running}\n"
+            f"큐 통계: {stats}\n"
+            f"마지막 오류: {analyzer.last_error or '없음'}"
+        )
 
     if analyzed == 0:
         st.markdown("---")
