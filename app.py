@@ -1448,8 +1448,8 @@ def render_sector_tab(api_key: str) -> None:  # noqa: C901
         if analyzer.last_error:
             st.error(f"⚠️ 마지막 오류: `{analyzer.last_error}`")
 
-    # 디버그 정보
-    with st.expander("🔧 디버그 정보", expanded=False):
+    # ── 디버그 정보 ──────────────────────────
+    with st.expander("🔧 디버그 / 실시간 로그", expanded=(analyzed == 0 and running)):
         from data.sector_db import DB_PATH
         import os
         st.code(
@@ -1459,6 +1459,9 @@ def render_sector_tab(api_key: str) -> None:  # noqa: C901
             f"큐 통계: {stats}\n"
             f"마지막 오류: {analyzer.last_error or '없음'}"
         )
+        log_text = analyzer.get_log()
+        if log_text:
+            st.text(log_text)
 
     if analyzed == 0:
         st.markdown("---")

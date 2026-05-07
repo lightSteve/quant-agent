@@ -4,15 +4,16 @@ KOSPI 전 종목 섹터별 전수 분석 — 백그라운드 스레드 워커.
 흐름:
   1. FinanceDataReader로 KOSPI 종목 목록 수집 (없으면 대표 20종목 fallback)
   2. SQLite 큐에 적재 (우선순위: 낮은 PBR = 높은 우선순위 → 저평가 후보 먼저)
-  3. 백그라운드 스레드가 40초 간격으로 1종목씩 yfinance + AI 분석
-  4. 결과 SQLite 저장 → UI가 언제든 조회 가능
+  3. 백그라운드 스레드가 15초 간격으로 1종목씩 yfinance + AI 분석
+  4. 결과는 성공/실패 무관하게 항상 SQLite 저장 → UI가 언제든 조회 가능
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-import time
+from collections import deque
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import yfinance as yf
@@ -23,7 +24,6 @@ from data.sector_db import (
     get_next_pending,
     init_db,
     mark_in_progress,
-    mark_pending,
     reset_in_progress,
     save_result,
 )
@@ -31,9 +31,10 @@ from data.sector_db import (
 logger = logging.getLogger(__name__)
 
 # ── 상수 ──────────────────────────────────────
-ANALYSIS_INTERVAL_SECS = 40   # 종목 간 대기 (API rate-limit 준수)
+ANALYSIS_INTERVAL_SECS = 15   # 종목 간 대기 (첫 종목은 즉시 처리)
 REANALYSIS_DAYS = 7            # 재분석 주기 (일)
 IDLE_WAIT_SECS = 60            # 큐 소진 시 대기
+MAX_LOG_LINES = 30             # UI 로그 버퍼 크기
 
 SECTOR_KR: Dict[str, str] = {
     "Technology": "기술",
@@ -193,8 +194,10 @@ class SectorAnalyzer:
         self._provider = "github"
         self._current_ticker = ""
         self._last_error = ""
+        self._log_buffer: deque = deque(maxlen=MAX_LOG_LINES)
         init_db()
         reset_in_progress()
+        self._log("워커 초기화 완료")
 
     # ── 공개 인터페이스 ─────────────────────
 
@@ -209,20 +212,21 @@ class SectorAnalyzer:
             target=self._run_loop, daemon=True, name="sector-analyzer"
         )
         self._thread.start()
-        logger.info("섹터 분석기 시작 (provider=%s)", provider)
+        self._log(f"분석 시작 (provider={provider})")
         return True
 
     def stop(self) -> None:
-        """분석 중지 요청. 현재 분석 중인 종목 완료 후 종료."""
         self._stop_event.set()
+        self._log("중지 요청됨")
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
     def load_queue(self) -> int:
-        """KOSPI 종목 목록을 가져와 큐에 적재. 반환: 신규 추가 수."""
         stocks = _fetch_kospi_stocks()
-        return add_stocks_to_queue(stocks)
+        n = add_stocks_to_queue(stocks)
+        self._log(f"큐 적재: 신규 {n}개 / 전체 {len(stocks)}개")
+        return n
 
     @property
     def current_ticker(self) -> str:
@@ -232,111 +236,142 @@ class SectorAnalyzer:
     def last_error(self) -> str:
         return self._last_error
 
+    def get_log(self) -> str:
+        return "\n".join(self._log_buffer)
+
+    # ── 내부 유틸 ───────────────────────────
+
+    def _log(self, msg: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._log_buffer.append(f"[{ts}] {msg}")
+
     # ── 백그라운드 루프 ─────────────────────
 
     def _run_loop(self) -> None:
+        """핵심 변경: 모든 예외를 내부에서 처리하고 항상 save_result 호출."""
+        first = True
         while not self._stop_event.is_set():
             try:
                 stock = get_next_pending(REANALYSIS_DAYS)
                 if stock is None:
                     self._current_ticker = ""
+                    self._log("큐 소진 — 대기 중...")
                     self._stop_event.wait(IDLE_WAIT_SECS)
                     continue
 
                 ticker = stock["ticker"]
                 self._current_ticker = ticker
                 mark_in_progress(ticker)
+                self._log(f"▶ 분석 시작: {stock.get('company_name', ticker)} ({ticker})")
 
-                try:
-                    self._analyze_one(stock)
-                except Exception as exc:
-                    self._last_error = f"{ticker}: {str(exc)[:120]}"
-                    logger.error("%s 분석 오류: %s", ticker, exc)
-                    mark_pending(ticker)  # 다음 주기에 재시도
-                finally:
-                    self._current_ticker = ""
+                self._analyze_one(stock)  # 내부에서 항상 save_result 호출
 
-                # rate-limit 준수 대기
-                self._stop_event.wait(ANALYSIS_INTERVAL_SECS)
+                self._current_ticker = ""
+
+                # 첫 종목은 즉시 처리, 이후 간격 준수
+                if first:
+                    first = False
+                else:
+                    self._stop_event.wait(ANALYSIS_INTERVAL_SECS)
 
             except Exception as exc:
-                logger.error("루프 오류: %s", exc)
+                logger.error("루프 레벨 오류: %s", exc)
+                self._log(f"루프 오류: {str(exc)[:80]}")
                 self._stop_event.wait(10)
 
-        logger.info("섹터 분석기 종료")
+        self._log("워커 종료")
 
     def _analyze_one(self, stock: Dict[str, Any]) -> None:
+        """
+        핵심 변경: try/finally로 save_result를 항상 보장.
+        성공·실패·타임아웃 모두 sector_analysis에 기록되어 분석완료 수가 증가.
+        """
         ticker = stock["ticker"]
         company_name = stock.get("company_name", ticker)
         sector = stock.get("sector", "")
 
-        # 1. 재무 지표 수집
-        metrics = _fetch_metrics(ticker)
-        if metrics.get("company_name"):
-            company_name = metrics["company_name"]
-        if metrics.get("sector"):
-            sector = metrics["sector"]
-
-        sector_kr = SECTOR_KR.get(sector, sector)
-
-        # 유효 지표 없으면 "데이터 없음"으로 저장 후 스킵
-        has_data = any(
-            metrics.get(k) is not None
-            for k in ("per", "pbr", "profit_margin")
-        )
-        if not has_data:
-            logger.debug("%s 유효 지표 없음, 스킵", ticker)
-            save_result(
-                {
-                    "ticker": ticker,
-                    "company_name": company_name,
-                    "sector": sector,
-                    "sector_kr": sector_kr,
-                    "market": stock.get("market", "KOSPI"),
-                    "ai_summary": "재무 데이터 없음 (상장폐지 또는 조회 불가)",
-                }
-            )
-            return
-
-        # 2. AI 매수 매력도 분석
-        agent = AnalystAgent(self._api_key, provider=self._provider)
-        metrics_for_ai = {
-            "PER":          metrics.get("per"),
-            "PBR":          metrics.get("pbr"),
-            "순이익마진":   f"{(metrics.get('profit_margin') or 0) * 100:.1f}%",
-            "매출성장률":   f"{(metrics.get('revenue_growth') or 0) * 100:.1f}%",
-            "ROE":          f"{(metrics.get('roe') or 0) * 100:.1f}%",
-            "부채비율(D/E)": metrics.get("debt_to_equity"),
-            "배당수익률":   f"{(metrics.get('dividend_yield') or 0) * 100:.2f}%",
+        # 항상 저장될 기본 결과 dict
+        result: Dict[str, Any] = {
+            "ticker": ticker,
+            "company_name": company_name,
+            "sector": sector,
+            "sector_kr": SECTOR_KR.get(sector, sector),
+            "market": stock.get("market", "KOSPI"),
+            "ai_summary": "",
         }
-        ai = agent.analyze_buy_appeal(
-            ticker=ticker,
-            company_name=company_name,
-            sector=sector_kr or sector,
-            metrics=metrics_for_ai,
-        )
 
-        # 3. 결과 저장
-        save_result(
-            {
-                "ticker": ticker,
-                "company_name": company_name,
-                "sector": sector,
-                "sector_kr": sector_kr,
-                "market": stock.get("market", "KOSPI"),
-                "per":             metrics.get("per"),
-                "pbr":             metrics.get("pbr"),
-                "profit_margin":   metrics.get("profit_margin"),
-                "revenue_growth":  metrics.get("revenue_growth"),
-                "appeal_score":    ai.get("appeal_score"),
-                "buy_signal":      ai.get("buy_signal", False),
-                "ai_summary":      ai.get("summary", ""),
-                "key_strength":    ai.get("key_strength", ""),
-                "key_risk":        ai.get("key_risk", ""),
-                "investment_horizon": ai.get("investment_horizon", ""),
-            }
-        )
-        logger.info(
-            "✓ %s(%s) 분석 완료 — 매력도: %s",
-            company_name, ticker, ai.get("appeal_score"),
-        )
+        try:
+            # 1. 재무 지표 수집
+            metrics = _fetch_metrics(ticker)
+            if metrics.get("company_name"):
+                result["company_name"] = metrics["company_name"]
+            if metrics.get("sector"):
+                result["sector"] = metrics["sector"]
+                result["sector_kr"] = SECTOR_KR.get(metrics["sector"], metrics["sector"])
+
+            result.update({
+                "per":            metrics.get("per"),
+                "pbr":            metrics.get("pbr"),
+                "profit_margin":  metrics.get("profit_margin"),
+                "revenue_growth": metrics.get("revenue_growth"),
+            })
+
+            has_data = any(
+                metrics.get(k) is not None
+                for k in ("per", "pbr", "profit_margin")
+            )
+
+            if not has_data:
+                result["ai_summary"] = "재무 데이터 없음 (Yahoo Finance 조회 불가)"
+                self._log(f"  → {ticker} 재무 데이터 없음")
+            else:
+                # 2. AI 매수 매력도 분석 (실패해도 재무 데이터만으로 저장)
+                try:
+                    agent = AnalystAgent(self._api_key, provider=self._provider)
+                    metrics_for_ai = {
+                        "PER":          metrics.get("per"),
+                        "PBR":          metrics.get("pbr"),
+                        "순이익마진":   f"{(metrics.get('profit_margin') or 0) * 100:.1f}%",
+                        "매출성장률":   f"{(metrics.get('revenue_growth') or 0) * 100:.1f}%",
+                        "ROE":          f"{(metrics.get('roe') or 0) * 100:.1f}%",
+                        "부채비율(D/E)": metrics.get("debt_to_equity"),
+                        "배당수익률":   f"{(metrics.get('dividend_yield') or 0) * 100:.2f}%",
+                    }
+                    ai = agent.analyze_buy_appeal(
+                        ticker=ticker,
+                        company_name=result["company_name"],
+                        sector=result.get("sector_kr") or sector,
+                        metrics=metrics_for_ai,
+                    )
+                    result.update({
+                        "appeal_score":       ai.get("appeal_score"),
+                        "buy_signal":         ai.get("buy_signal", False),
+                        "ai_summary":         ai.get("summary", ""),
+                        "key_strength":       ai.get("key_strength", ""),
+                        "key_risk":           ai.get("key_risk", ""),
+                        "investment_horizon": ai.get("investment_horizon", ""),
+                    })
+                    self._log(
+                        f"  ✓ {result['company_name']} 완료 "
+                        f"(매력도={ai.get('appeal_score')}, "
+                        f"매수={'✅' if ai.get('buy_signal') else '⚪'})"
+                    )
+                except Exception as ai_exc:
+                    err = str(ai_exc)[:100]
+                    self._last_error = f"{ticker} AI: {err}"
+                    result["ai_summary"] = f"AI 분석 실패: {err}"
+                    self._log(f"  ⚠ {ticker} AI 오류: {err}")
+
+        except Exception as exc:
+            err = str(exc)[:100]
+            self._last_error = f"{ticker}: {err}"
+            result["ai_summary"] = f"수집 오류: {err}"
+            self._log(f"  ✗ {ticker} 오류: {err}")
+
+        finally:
+            # 성공/실패 무관 항상 저장 → analyzed 카운트 증가
+            try:
+                save_result(result)
+            except Exception as save_exc:
+                self._log(f"  ✗ {ticker} DB 저장 실패: {str(save_exc)[:80]}")
+                logger.error("%s save_result 실패: %s", ticker, save_exc)
