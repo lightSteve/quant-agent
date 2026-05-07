@@ -31,10 +31,13 @@ from data.sector_db import (
 logger = logging.getLogger(__name__)
 
 # ── 상수 ──────────────────────────────────────
-ANALYSIS_INTERVAL_SECS = 15   # 종목 간 대기 (첫 종목은 즉시 처리)
+METRICS_INTERVAL_SECS = 5      # 재무수집만 할 때 간격 (빠름)
+AI_INTERVAL_SECS = 1800        # AI 포함 분석 간격 (GitHub Models: 50/day)
 REANALYSIS_DAYS = 7            # 재분석 주기 (일)
 IDLE_WAIT_SECS = 60            # 큐 소진 시 대기
-MAX_LOG_LINES = 30             # UI 로그 버퍼 크기
+MAX_LOG_LINES = 50             # UI 로그 버퍼 크기
+RATE_LIMIT_WINDOW = 86400      # GitHub Models 제한 윈도우(초)
+RATE_LIMIT_MAX = 50            # GitHub Models 일일 최대 요청
 
 SECTOR_KR: Dict[str, str] = {
     "Technology": "기술",
@@ -219,6 +222,9 @@ class SectorAnalyzer:
         self._current_ticker = ""
         self._last_error = ""
         self._log_buffer: deque = deque(maxlen=MAX_LOG_LINES)
+        # 429 속도 제한 관리
+        self._rate_limit_until: float = 0.0   # epoch 초, 이 시각까지 AI 호출 금지
+        self._ai_calls_today: int = 0          # 오늘 AI 호출 횟수 (참고용)
         init_db()
         reset_in_progress()
         self._log("워커 초기화 완료")
@@ -260,6 +266,15 @@ class SectorAnalyzer:
     def last_error(self) -> str:
         return self._last_error
 
+    @property
+    def rate_limited(self) -> bool:
+        import time as _time
+        return _time.time() < self._rate_limit_until
+
+    @property
+    def rate_limit_resume_at(self) -> float:
+        return self._rate_limit_until
+
     def get_log(self) -> str:
         return "\n".join(self._log_buffer)
 
@@ -272,8 +287,8 @@ class SectorAnalyzer:
     # ── 백그라운드 루프 ─────────────────────
 
     def _run_loop(self) -> None:
-        """핵심 변경: 모든 예외를 내부에서 처리하고 항상 save_result 호출."""
-        first = True
+        """모든 예외를 내부에서 처리하고 항상 save_result 호출. 429 속도제한 자동 관리."""
+        import time as _time
         while not self._stop_event.is_set():
             try:
                 stock = get_next_pending(REANALYSIS_DAYS)
@@ -286,17 +301,24 @@ class SectorAnalyzer:
                 ticker = stock["ticker"]
                 self._current_ticker = ticker
                 mark_in_progress(ticker)
-                self._log(f"▶ 분석 시작: {stock.get('company_name', ticker)} ({ticker})")
 
-                self._analyze_one(stock)  # 내부에서 항상 save_result 호출
+                ai_available = _time.time() >= self._rate_limit_until
+                if not ai_available:
+                    remain = int(self._rate_limit_until - _time.time())
+                    h, m = divmod(remain // 60, 60)
+                    self._log(
+                        f"▶ 재무수집만: {stock.get('company_name', ticker)} ({ticker}) "
+                        f"[AI 속도제한 해제까지 {h}시간 {m}분]"
+                    )
+                else:
+                    self._log(f"▶ 분석 시작: {stock.get('company_name', ticker)} ({ticker})")
 
+                self._analyze_one(stock, ai_available=ai_available)
                 self._current_ticker = ""
 
-                # 첫 종목은 즉시 처리, 이후 간격 준수
-                if first:
-                    first = False
-                else:
-                    self._stop_event.wait(ANALYSIS_INTERVAL_SECS)
+                # 속도제한 중엔 재무수집만 빠르게, 아니면 AI 호출 간격 준수
+                interval = METRICS_INTERVAL_SECS if not ai_available else AI_INTERVAL_SECS
+                self._stop_event.wait(interval)
 
             except Exception as exc:
                 logger.error("루프 레벨 오류: %s", exc)
@@ -305,10 +327,11 @@ class SectorAnalyzer:
 
         self._log("워커 종료")
 
-    def _analyze_one(self, stock: Dict[str, Any]) -> None:
+    def _analyze_one(self, stock: Dict[str, Any], ai_available: bool = True) -> None:
         """
-        핵심 변경: try/finally로 save_result를 항상 보장.
-        성공·실패·타임아웃 모두 sector_analysis에 기록되어 분석완료 수가 증가.
+        try/finally로 save_result를 항상 보장.
+        ai_available=False이면 재무수집만 저장 (AI 스킵).
+        429 감지 시 self._rate_limit_until 설정.
         """
         ticker = stock["ticker"]
         company_name = stock.get("company_name", ticker)
@@ -352,9 +375,14 @@ class SectorAnalyzer:
                     f"per={metrics.get('per')}, pbr={metrics.get('pbr')})"
                 )
                 result["ai_summary"] = "재무 데이터 없음 (Yahoo Finance 조회 불가)"
+            elif not ai_available:
+                # 속도제한 중: 재무 데이터만 저장, AI는 나중에
+                result["ai_summary"] = "재무 수집 완료 (AI 대기 중 — 속도제한)"
+                self._log(f"  ✓ {ticker} 재무 저장 (AI 스킵)")
             else:
                 # 2. AI 매수 매력도 분석 (실패해도 재무 데이터만으로 저장)
                 try:
+                    import time as _time
                     agent = AnalystAgent(self._api_key, provider=self._provider)
                     metrics_for_ai = {
                         "PER":          metrics.get("per"),
@@ -371,6 +399,7 @@ class SectorAnalyzer:
                         sector=result.get("sector_kr") or sector,
                         metrics=metrics_for_ai,
                     )
+                    self._ai_calls_today += 1
                     result.update({
                         "appeal_score":       ai.get("appeal_score"),
                         "buy_signal":         ai.get("buy_signal", False),
@@ -382,13 +411,30 @@ class SectorAnalyzer:
                     self._log(
                         f"  ✓ {result['company_name']} 완료 "
                         f"(매력도={ai.get('appeal_score')}, "
-                        f"매수={'✅' if ai.get('buy_signal') else '⚪'})"
+                        f"매수={'✅' if ai.get('buy_signal') else '⚪'}, "
+                        f"오늘 AI {self._ai_calls_today}/{RATE_LIMIT_MAX}회)"
                     )
                 except Exception as ai_exc:
-                    err = str(ai_exc)[:100]
-                    self._last_error = f"{ticker} AI: {err}"
-                    result["ai_summary"] = f"AI 분석 실패: {err}"
-                    self._log(f"  ⚠ {ticker} AI 오류: {err}")
+                    err = str(ai_exc)
+                    self._last_error = f"{ticker} AI: {err[:100]}"
+                    # 429 속도제한 감지
+                    if "429" in err or "RateLimitReached" in err or "rate limit" in err.lower():
+                        import time as _time
+                        # 남은 할당량으로 다음 허용 시각 계산
+                        used = max(self._ai_calls_today, 1)
+                        per_call = RATE_LIMIT_WINDOW / RATE_LIMIT_MAX
+                        wait = per_call * (RATE_LIMIT_MAX - used + 1)
+                        wait = max(wait, per_call)  # 최소 1 interval
+                        self._rate_limit_until = _time.time() + wait
+                        h, m = divmod(int(wait) // 60, 60)
+                        result["ai_summary"] = f"재무 수집 완료 (AI 속도제한 — {h}시간 {m}분 후 재개)"
+                        self._log(
+                            f"  ⚠ 429 속도제한! {h}시간 {m}분 후 AI 재개. "
+                            f"그 동안 재무수집 계속."
+                        )
+                    else:
+                        result["ai_summary"] = f"AI 분석 실패: {err[:100]}"
+                        self._log(f"  ⚠ {ticker} AI 오류: {err[:80]}")
 
         except Exception as exc:
             err = str(exc)[:100]

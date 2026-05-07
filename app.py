@@ -1438,11 +1438,21 @@ def render_sector_tab(api_key: str) -> None:  # noqa: C901
     c5.metric("진행률", f"{analyzed / total * 100:.1f}%")
 
     if running:
+        # 속도제한 상태 배너
+        if analyzer.rate_limited:
+            import time as _t
+            remain = int(analyzer.rate_limit_resume_at - _t.time())
+            h, m = divmod(remain // 60, 60)
+            st.warning(
+                f"⏳ **GitHub Models 일일 한도(50회) 도달** — "
+                f"AI 분석은 **{h}시간 {m}분 후** 재개됩니다. "
+                f"그 동안 재무 데이터 수집은 계속됩니다."
+            )
         st.progress(min(analyzed / total, 1.0))
         status_cols = st.columns([3, 1])
         with status_cols[0]:
             if analyzer.current_ticker:
-                st.info(f"⚙️ 현재 분석 중: `{analyzer.current_ticker}` — 약 40초마다 1종목 처리됩니다. **🔄 새로고침** 버튼으로 최신 결과를 확인하세요.")
+                st.info(f"⚙️ 현재 처리 중: `{analyzer.current_ticker}`")
             else:
                 st.info("⏳ 다음 종목 대기 중... **🔄 새로고침** 버튼으로 최신 결과를 확인하세요.")
         if analyzer.last_error:
