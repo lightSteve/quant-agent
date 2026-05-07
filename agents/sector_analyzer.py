@@ -61,15 +61,19 @@ def _fetch_kospi_stocks() -> List[Dict[str, Any]]:
         import FinanceDataReader as fdr  # optional dependency
 
         df = fdr.StockListing("KOSPI")
+        if df is None or df.empty:
+            logger.warning("FDR 빈 결과 → fallback 사용")
+            return _fallback_stocks()
+
         stocks: List[Dict[str, Any]] = []
         for _, row in df.iterrows():
-            symbol = str(row.get("Symbol", "")).strip()
+            # 컬럼명 버전 차이 대응: Symbol / Code
+            symbol = str(row.get("Symbol") or row.get("Code") or "").strip()
             if not symbol or not symbol.isdigit():
                 continue
             ticker = f"{symbol}.KS"
-            name = str(row.get("Name", symbol))
-            sector = str(row.get("Sector", "") or "")
-            # 시가총액 역수 = 우선순위 (데이터가 많은 대형주 먼저)
+            name = str(row.get("Name") or row.get("ISU_ABBRV") or symbol)
+            sector = str(row.get("Sector") or row.get("Industry") or "")
             try:
                 mc = float(row.get("MarketCap", 0) or 0)
                 priority = 1.0 / mc if mc > 0 else 999.0
@@ -84,6 +88,11 @@ def _fetch_kospi_stocks() -> List[Dict[str, Any]]:
                     "priority": priority,
                 }
             )
+
+        if len(stocks) == 0:
+            logger.warning("FDR에서 유효 종목 0개 → fallback 사용 (columns=%s)", list(df.columns))
+            return _fallback_stocks()
+
         logger.info("KOSPI 종목 %d개 로드 완료", len(stocks))
         return stocks
     except ImportError:
