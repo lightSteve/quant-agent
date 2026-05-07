@@ -15,3 +15,6 @@ Thumbs.db
 
 # Streamlit 로컬 설정
 .streamlit/secrets.toml
+
+# 분기 캐시 파일 (로컬 전용, 리포에 포함 안 함)
+cache/*.json

@@ -19,6 +19,7 @@ from agents.analyst_agent import AnalystAgent
 from agents.quant_scorer import QuantScorer
 from data.fetcher import FinancialDataFetcher
 from utils.formatters import fmt_number, fmt_pct, fmt_ratio, fmt_usd, score_color
+from utils import cache_manager
 
 load_dotenv()
 
@@ -158,6 +159,12 @@ def build_sidebar() -> dict:
         )
         dca_years = st.selectbox("시뮬레이션 기간", [1, 3, 5], index=1)
 
+        st.markdown("---")
+        force_refresh = st.checkbox(
+            "🔄 새 데이터로 재분석",
+            value=False,
+            help="저장된 캐시를 무시하고 최신 데이터로 다시 분석합니다",
+        )
         analyze = st.button("🚀 분석 시작", use_container_width=True, type="primary")
 
     return {
@@ -168,6 +175,7 @@ def build_sidebar() -> dict:
         "uploaded_image": uploaded_image,
         "monthly_amount": monthly_amount,
         "dca_years": dca_years,
+        "force_refresh": force_refresh,
         "analyze": analyze,
     }
 
@@ -236,7 +244,7 @@ def render_tab_financials(
     st.markdown('<span class="step-badge">1단계 · 데이터 수집</span>', unsafe_allow_html=True)
     st.subheader("📊 3개년 재무 추이")
 
-    if fetcher and not financials.empty:
+    if not financials.empty:
         years = _years_from_df(financials)
 
         fig = make_subplots(
@@ -337,7 +345,7 @@ def render_tab_financials(
         st.info("재무 데이터를 불러올 수 없습니다.")
 
     # Price history
-    if fetcher and not price_history.empty:
+    if not price_history.empty:
         st.subheader("📈 주가 추이 (3년)")
         fig_p = go.Figure()
         fig_p.add_trace(
@@ -376,7 +384,7 @@ def render_tab_ai_summary(
     if plain_summary:
         st.markdown(plain_summary)
     elif not has_api_key:
-        st.info("💡 OpenAI API 키를 입력하면 AI 분석 요약을 받을 수 있습니다.")
+        st.info("💡 사이드바에 GitHub PAT를 입력하면 AI 분석 요약을 받을 수 있습니다.")
 
     if metrics:
         st.subheader("📊 핵심 지표")
@@ -648,23 +656,34 @@ def render_tab_investment_score(
     )
 
     if dca_results:
+        total_months = dca_years * 12
+        total_invested = monthly_amount * total_months
+
+        st.markdown(f"**총 납입 원금:** {total_invested:,.0f}원 ({monthly_amount:,.0f}원 × {total_months}개월)")
+        st.markdown("---")
+
         col_d1, col_d2 = st.columns(2)
 
-        def _dca_metric(col, label: str, result: dict) -> None:
+        def _dca_metric(col, label: str, result: dict, currency_label: str = "") -> None:
             with col:
                 ret = result["return_pct"]
+                invested = result["total_invested"]
+                final = result["final_value_units"]
+                profit = final - invested
+
                 color_d = "normal" if ret >= 0 else "inverse"
                 st.metric(
                     label,
                     f"{ret:+.2f}%",
-                    f"투자 원금 기준 수익률 ({dca_years}년)",
+                    f"{'▲' if ret >= 0 else '▼'} {abs(profit):,.0f}{currency_label} 수익",
                     delta_color=color_d,
                 )
+                st.caption(f"납입 원금: {invested:,.0f}{currency_label}  →  최종 평가액: {final:,.0f}{currency_label}")
 
         if "stock" in dca_results:
-            _dca_metric(col_d1, f"📊 {company_name}", dca_results["stock"])
+            _dca_metric(col_d1, f"📊 {company_name}", dca_results["stock"], currency_label=f" {currency}")
         if "sp500" in dca_results:
-            _dca_metric(col_d2, "📊 S&P 500 (SPY)", dca_results["sp500"])
+            _dca_metric(col_d2, "📊 S&P 500 (SPY)", dca_results["sp500"], currency_label=" USD")
 
         # Normalised price chart
         if "stock" in dca_results and "sp500" in dca_results:
@@ -695,6 +714,89 @@ def render_tab_investment_score(
 
 
 # ──────────────────────────────────────────────
+# Results renderer  (live 분석 & 캐시 로드 공용)
+# ──────────────────────────────────────────────
+
+def _render_results(
+    data: dict,
+    api_key: str,
+    monthly_amount: float,
+    dca_years: int,
+    cache_info: dict | None = None,
+) -> None:
+    company_name   = data["company_name"]
+    sector         = data["sector"]
+    industry       = data["industry"]
+    currency       = data["currency"]
+    metrics        = data.get("metrics", {})
+    financials     = data.get("financials", pd.DataFrame())
+    price_history  = data.get("price_history", pd.DataFrame())
+    profit_margins = data.get("profit_margins", pd.Series(dtype=float))
+    peer_df        = data.get("peer_df", pd.DataFrame())
+    dca_results    = data.get("dca_results", {})
+    plain_summary   = data.get("plain_summary", "")
+    undervaluation  = data.get("undervaluation", {})
+    investment_data = data.get("investment_data", {})
+    quant_result    = data.get("quant_result", {})
+    image_data      = data.get("image_data")
+
+    if cache_info:
+        next_r = cache_info["next_refresh"]
+        quarter = cache_info["quarter"]
+        cached_at = cache_info["cached_at"]
+        st.info(
+            f"📦 캐시된 분석 결과 · **{cached_at}** 저장 · "
+            f"다음 분기 갱신 예정: **{next_r}** ({quarter})  "
+            f"　*(사이드바 🔄 체크 후 재분석하면 최신 데이터로 업데이트됩니다)*"
+        )
+
+    st.markdown(
+        f"""
+        <div class="hero">
+          <h1>📋 {company_name} 분석 결과</h1>
+          <p>{sector} · {industry} · 통화: {currency}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if metrics:
+        c1, c2, c3, c4 = st.columns(4)
+        price = metrics.get("current_price")
+        mc    = metrics.get("market_cap")
+        per   = metrics.get("pe_ratio")
+        pbr   = metrics.get("pb_ratio")
+        with c1:
+            st.metric("현재 주가", f"{price:,.2f} {currency}" if price else "N/A")
+        with c2:
+            st.metric("시가총액", fmt_usd(mc) if currency == "USD" else fmt_number(mc, currency))
+        with c3:
+            st.metric("PER", fmt_ratio(per))
+        with c4:
+            st.metric("PBR", fmt_ratio(pbr))
+
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["📊 재무 데이터", "💬 AI 해석", "🔍 저평가 분석", "🏆 투자 점수 & 전략"]
+    )
+    with tab1:
+        render_tab_financials(
+            None, financials, metrics, profit_margins, price_history,
+            company_name, image_data,
+        )
+    with tab2:
+        render_tab_ai_summary(plain_summary, metrics, bool(api_key))
+    with tab3:
+        render_tab_undervaluation(
+            quant_result, undervaluation, peer_df, metrics, company_name, bool(api_key)
+        )
+    with tab4:
+        render_tab_investment_score(
+            quant_result, investment_data, dca_results,
+            monthly_amount, dca_years, company_name, currency, bool(api_key),
+        )
+
+
+# ──────────────────────────────────────────────
 # Main orchestration
 # ──────────────────────────────────────────────
 
@@ -707,6 +809,26 @@ def run_analysis(cfg: dict) -> None:
 
     agent = AnalystAgent(api_key, provider=cfg.get("provider", "openai")) if api_key else None
     scorer = QuantScorer()
+
+    # ── 캐시 확인 ─────────────────────────────
+    force_refresh = cfg.get("force_refresh", False)
+    if ticker_input and not force_refresh:
+        resolved = FinancialDataFetcher._resolve_ticker(ticker_input)
+        if cache_manager.is_valid(resolved):
+            cached = cache_manager.load(resolved)
+            if cached:
+                _render_results(
+                    data=cached["data"],
+                    api_key=api_key,
+                    monthly_amount=monthly_amount,
+                    dca_years=dca_years,
+                    cache_info={
+                        "cached_at":    cached["cached_at"],
+                        "quarter":      cached["quarter"],
+                        "next_refresh": cached["next_refresh"],
+                    },
+                )
+                return
 
     status = st.empty()
     progress = st.progress(0)
@@ -824,52 +946,52 @@ def run_analysis(cfg: dict) -> None:
     status.empty()
     progress.empty()
 
-    # ── Display ───────────────────────────────
-    st.markdown(
-        f"""
-        <div class="hero">
-          <h1>📋 {company_name} 분석 결과</h1>
-          <p>{sector} · {industry} · 통화: {currency}</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    # ── 캐시 저장 ─────────────────────────────
+    if fetcher:
+        try:
+            cache_manager.save(fetcher.ticker, {
+                "company_name":   company_name,
+                "sector":         sector,
+                "industry":       industry,
+                "currency":       currency,
+                "metrics":        metrics,
+                "financials":     financials,
+                "price_history":  price_history,
+                "profit_margins": profit_margins,
+                "peer_df":        peer_df,
+                "dca_results":    dca_results,
+                "plain_summary":  plain_summary,
+                "undervaluation": undervaluation,
+                "investment_data": investment_data,
+                "quant_result":   quant_result,
+                "image_data":     None,
+            })
+        except Exception:
+            pass  # 캐시 저장 실패는 비치명적
+
+    # ── 결과 렌더링 ───────────────────────────
+    _render_results(
+        data={
+            "company_name":   company_name,
+            "sector":         sector,
+            "industry":       industry,
+            "currency":       currency,
+            "metrics":        metrics,
+            "financials":     financials,
+            "price_history":  price_history,
+            "profit_margins": profit_margins,
+            "peer_df":        peer_df,
+            "dca_results":    dca_results,
+            "plain_summary":  plain_summary,
+            "undervaluation": undervaluation,
+            "investment_data": investment_data,
+            "quant_result":   quant_result,
+            "image_data":     image_data,
+        },
+        api_key=api_key,
+        monthly_amount=monthly_amount,
+        dca_years=dca_years,
     )
-
-    if fetcher and metrics:
-        c1, c2, c3, c4 = st.columns(4)
-        price = metrics.get("current_price")
-        mc = metrics.get("market_cap")
-        per = metrics.get("pe_ratio")
-        pbr = metrics.get("pb_ratio")
-        with c1:
-            st.metric("현재 주가", f"{price:,.2f} {currency}" if price else "N/A")
-        with c2:
-            st.metric("시가총액", fmt_usd(mc) if currency == "USD" else fmt_number(mc, currency))
-        with c3:
-            st.metric("PER", fmt_ratio(per))
-        with c4:
-            st.metric("PBR", fmt_ratio(pbr))
-
-    tab1, tab2, tab3, tab4 = st.tabs(
-        ["📊 재무 데이터", "💬 AI 해석", "🔍 저평가 분석", "🏆 투자 점수 & 전략"]
-    )
-
-    with tab1:
-        render_tab_financials(
-            fetcher, financials, metrics, profit_margins, price_history,
-            company_name, image_data,
-        )
-    with tab2:
-        render_tab_ai_summary(plain_summary, metrics, bool(api_key))
-    with tab3:
-        render_tab_undervaluation(
-            quant_result, undervaluation, peer_df, metrics, company_name, bool(api_key)
-        )
-    with tab4:
-        render_tab_investment_score(
-            quant_result, investment_data, dca_results,
-            monthly_amount, dca_years, company_name, currency, bool(api_key),
-        )
 
 
 # ──────────────────────────────────────────────
