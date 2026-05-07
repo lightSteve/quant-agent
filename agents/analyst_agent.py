@@ -279,3 +279,46 @@ class AnalystAgent:
                 "rank_list": [],
                 "caution": "",
             }
+
+    # ------------------------------------------------------------------
+    # Step 6 – Sector scan: quick buy-appeal per stock
+    # ------------------------------------------------------------------
+
+    def analyze_buy_appeal(
+        self,
+        ticker: str,
+        company_name: str,
+        sector: str,
+        metrics: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        섹터 전수 분석용 경량 AI 판단.
+        토큰 사용을 최소화하면서 핵심 매수 매력도를 평가한다.
+        """
+        prompt = (
+            f"종목: {company_name} ({ticker}), 섹터: {sector}\n\n"
+            f"주요 재무 지표:\n{json.dumps(metrics, ensure_ascii=False, indent=2)}\n\n"
+            "위 데이터를 바탕으로 '저평가 매수 매력도'를 평가해줘. "
+            "PBR 1 미만·낮은 PER·높은 순이익마진을 긍정 신호로 본다.\n\n"
+            "반드시 아래 JSON 형식으로만 답해줘:\n"
+            "{\n"
+            '  "appeal_score": 0~10 (10이 가장 매력적),\n'
+            '  "buy_signal": true 또는 false,\n'
+            '  "summary": "매수 매력도 요약 (2~3문장, 수치 근거 포함)",\n'
+            '  "key_strength": "핵심 강점 한 문장",\n'
+            '  "key_risk": "핵심 위험 한 문장",\n'
+            '  "investment_horizon": "단기 / 중기 / 장기"\n'
+            "}"
+        )
+        raw = self._chat(prompt, temperature=0.3, max_tokens=600, json_mode=True)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {
+                "appeal_score": 0,
+                "buy_signal": False,
+                "summary": raw[:300] if raw else "분석 실패",
+                "key_strength": "",
+                "key_risk": "",
+                "investment_horizon": "알 수 없음",
+            }

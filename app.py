@@ -17,7 +17,9 @@ from PIL import Image
 
 from agents.analyst_agent import AnalystAgent
 from agents.quant_scorer import QuantScorer
+from agents.sector_analyzer import get_analyzer
 from data.fetcher import FinancialDataFetcher
+from data.sector_db import get_all_results, get_queue_stats, get_sectors, init_db
 from utils.formatters import fmt_number, fmt_pct, fmt_ratio, fmt_usd, score_color
 from utils import cache_manager
 
@@ -125,6 +127,14 @@ def build_sidebar() -> dict:
     with st.sidebar:
         st.markdown("## ⚙️ 설정")
 
+        # ── 페이지 모드 선택 ───────────────────
+        page = st.radio(
+            "📌 모드",
+            ["📊 개별 종목 분석", "🔭 섹터 전수 분석"],
+            horizontal=True,
+        )
+        st.markdown("---")
+
         api_key = st.text_input(
             "GitHub Personal Access Token (PAT)",
             type="password",
@@ -180,6 +190,7 @@ def build_sidebar() -> dict:
     return {
         "api_key": api_key,
         "provider": "github",
+        "page": page,
         "mode": mode,
         "ticker_input": ticker_input,
         "uploaded_image": uploaded_image,
@@ -1355,11 +1366,212 @@ def run_analysis(cfg: dict) -> None:
 
 
 # ──────────────────────────────────────────────
+# 섹터 전수 분석 탭
+# ──────────────────────────────────────────────
+
+def render_sector_tab(api_key: str) -> None:  # noqa: C901
+    """KOSPI 전 종목 백그라운드 AI 분석 결과 UI."""
+    init_db()
+    analyzer = get_analyzer()
+
+    st.markdown("## 🔭 KOSPI 섹터별 전수 분석")
+    st.caption(
+        "KOSPI 전 종목을 백그라운드에서 순차 AI 분석합니다. "
+        "분석 중에도 완료된 결과를 실시간으로 확인할 수 있습니다."
+    )
+
+    # ── 1. 제어 패널 ──────────────────────────
+    col_start, col_reload, col_reset = st.columns([1, 1, 1])
+
+    with col_start:
+        if not analyzer.is_running():
+            if st.button("▶ 분석 시작", type="primary", use_container_width=True):
+                if not api_key:
+                    st.error("사이드바에서 GitHub PAT를 먼저 입력하세요.")
+                else:
+                    loaded = analyzer.load_queue()
+                    started = analyzer.start(api_key, provider="github")
+                    if started:
+                        st.success(f"분석 시작! 신규 종목 {loaded}개 큐 추가")
+                    else:
+                        st.warning("이미 실행 중입니다.")
+                    st.rerun()
+        else:
+            if st.button("⏹ 분석 중지", use_container_width=True):
+                analyzer.stop()
+                st.rerun()
+
+    with col_reload:
+        if st.button("🔃 종목 재적재", use_container_width=True,
+                     help="KOSPI 종목 목록을 다시 불러와 새 종목만 추가합니다"):
+            n = analyzer.load_queue()
+            st.info(f"신규 {n}개 추가됨")
+
+    with col_reset:
+        if st.button("🗑 전체 초기화", use_container_width=True,
+                     help="큐와 분석 결과를 모두 삭제합니다 (주의)"):
+            from data.sector_db import reset_all
+            reset_all()
+            if analyzer.is_running():
+                analyzer.stop()
+            st.warning("초기화 완료")
+            st.rerun()
+
+    # ── 2. 진행 현황 ──────────────────────────
+    st.markdown("---")
+    stats = get_queue_stats()
+    total = max(stats["total"], 1)
+    analyzed = stats["analyzed"]
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    running = analyzer.is_running()
+    c1.metric("상태", "🟢 분석중" if running else "⚫ 중지")
+    c2.metric("전체 큐", f"{stats['total']:,}개")
+    c3.metric("분석 완료", f"{analyzed:,}개")
+    c4.metric("매수 신호", f"🎯 {stats['buy_signals']:,}개")
+    c5.metric("진행률", f"{analyzed / total * 100:.1f}%")
+
+    if running:
+        st.progress(min(analyzed / total, 1.0))
+        if analyzer.current_ticker:
+            st.caption(f"⚙️ 현재 분석 중: `{analyzer.current_ticker}`")
+        if analyzer.last_error:
+            st.caption(f"⚠️ 마지막 오류: {analyzer.last_error}")
+        st.info("🔄 분석이 진행 중입니다. 약 40초마다 1종목 처리됩니다. 페이지를 새로고침하면 최신 결과를 볼 수 있습니다.")
+
+    if analyzed == 0:
+        st.markdown("---")
+        st.info("▲ **분석 시작** 버튼을 눌러 KOSPI 종목 분석을 시작하세요.")
+        return
+
+    # ── 3. 필터 & 결과 테이블 ─────────────────
+    st.markdown("---")
+    st.subheader("📊 분석 결과")
+
+    sectors = ["전체"] + get_sectors()
+    f1, f2, f3 = st.columns([2, 2, 1])
+    with f1:
+        selected_sector = st.selectbox("섹터 필터", sectors, key="sector_filter")
+    with f2:
+        signal_filter = st.selectbox(
+            "매수 신호", ["전체", "✅ 매수 신호만", "⚪ 비신호만"], key="signal_filter"
+        )
+    with f3:
+        show_top = st.number_input("최대 표시", 10, 300, 100, 10, key="show_top")
+
+    results = get_all_results(
+        sector_filter=selected_sector if selected_sector != "전체" else None
+    )
+    if signal_filter == "✅ 매수 신호만":
+        results = [r for r in results if r.get("buy_signal")]
+    elif signal_filter == "⚪ 비신호만":
+        results = [r for r in results if not r.get("buy_signal")]
+    results = results[: int(show_top)]
+
+    if not results:
+        st.info("조건에 맞는 분석 결과가 없습니다.")
+        return
+
+    df = pd.DataFrame(results)
+    col_map = {
+        "company_name":       "종목명",
+        "ticker":             "코드",
+        "sector_kr":          "섹터",
+        "per":                "PER",
+        "pbr":                "PBR",
+        "profit_margin":      "순이익마진",
+        "appeal_score":       "매력도(0-10)",
+        "buy_signal":         "매수신호",
+        "investment_horizon": "투자기간",
+        "analyzed_at":        "분석일",
+    }
+    df_disp = df[[c for c in col_map if c in df.columns]].rename(columns=col_map)
+
+    def _fmt(col, fn):
+        if col in df_disp.columns:
+            df_disp[col] = df_disp[col].apply(fn)
+
+    _fmt("PER",        lambda x: f"{x:.1f}" if pd.notna(x) else "-")
+    _fmt("PBR",        lambda x: f"{x:.2f}" if pd.notna(x) else "-")
+    _fmt("순이익마진", lambda x: f"{float(x)*100:.1f}%" if pd.notna(x) else "-")
+    _fmt("매력도(0-10)", lambda x: f"{x:.1f}" if pd.notna(x) else "-")
+    _fmt("매수신호",   lambda x: "✅ 매수" if x else "⚪")
+    _fmt("분석일",     lambda x: str(x)[:10] if x else "-")
+
+    st.dataframe(df_disp, use_container_width=True, hide_index=True)
+
+    # ── 4. 상세 AI 리포트 ─────────────────────
+    st.markdown("---")
+    st.subheader("📋 상세 AI 리포트")
+
+    options = [f"{r['company_name']}  ({r['ticker']})" for r in results]
+    selected = st.selectbox("종목 선택", options, key="sector_detail_select")
+
+    if selected:
+        idx = options.index(selected)
+        r = results[idx]
+
+        score = r.get("appeal_score")
+        color = (
+            "#2e7d32" if score and score >= 7
+            else "#f57f17" if score and score >= 5
+            else "#c62828"
+        )
+
+        d1, d2, d3, d4 = st.columns(4)
+        with d1:
+            st.markdown(
+                f"<div style='text-align:center'>"
+                f"<span style='font-size:2.4rem;font-weight:bold;color:{color}'>"
+                f"{score:.1f}</span><br>"
+                f"<span style='font-size:0.8rem;color:#888'>매수 매력도</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        with d2:
+            st.metric("PER", f"{r['per']:.1f}" if r.get("per") else "-")
+        with d3:
+            st.metric("PBR", f"{r['pbr']:.2f}" if r.get("pbr") else "-")
+        with d4:
+            m = r.get("profit_margin")
+            st.metric("순이익마진", f"{m*100:.1f}%" if m else "-")
+
+        st.markdown(
+            f"**섹터:** {r.get('sector_kr') or r.get('sector') or '-'} &nbsp;|&nbsp; "
+            f"**투자기간:** {r.get('investment_horizon') or '-'}"
+        )
+
+        if r.get("buy_signal"):
+            st.success("✅ 매수 신호 감지")
+        else:
+            st.info("⚪ 매수 신호 없음")
+
+        if r.get("ai_summary"):
+            st.markdown("**AI 종합 판단**")
+            st.markdown(r["ai_summary"])
+
+        cs, cr = st.columns(2)
+        with cs:
+            if r.get("key_strength"):
+                st.success(f"💪 강점: {r['key_strength']}")
+        with cr:
+            if r.get("key_risk"):
+                st.error(f"⚠️ 위험: {r['key_risk']}")
+
+        if r.get("analyzed_at"):
+            st.caption(f"분석 시각: {str(r['analyzed_at'])[:19]}")
+
+
+# ──────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────
 
 def main() -> None:
     cfg = build_sidebar()
+
+    if cfg["page"] == "🔭 섹터 전수 분석":
+        render_sector_tab(cfg["api_key"])
+        return
 
     if cfg["analyze"]:
         ticker_raw = (cfg.get("ticker_input") or "").strip()
