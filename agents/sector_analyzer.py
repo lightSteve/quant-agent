@@ -142,36 +142,51 @@ def _fallback_stocks() -> List[Dict[str, Any]]:
 # ── yfinance 지표 수집 ────────────────────────
 
 def _fetch_metrics(ticker: str) -> Dict[str, Any]:
-    """yfinance에서 주요 재무 지표 수집 (타임아웃 15초)."""
+    """yfinance에서 주요 재무 지표 수집 (타임아웃 20초, 최대 2회 시도)."""
+    import time as _time
     import threading as _t
 
     result: Dict[str, Any] = {}
     exc_holder: list = []
 
     def _fetch():
-        try:
-            info = yf.Ticker(ticker).info or {}
-            result.update({
-                "per":            info.get("trailingPE"),
-                "pbr":            info.get("priceToBook"),
-                "profit_margin":  info.get("profitMargins"),
-                "revenue_growth": info.get("revenueGrowth"),
-                "roe":            info.get("returnOnEquity"),
-                "debt_to_equity": info.get("debtToEquity"),
-                "dividend_yield": info.get("dividendYield"),
-                "sector":         info.get("sector", ""),
-                "company_name":   info.get("longName") or info.get("shortName", ""),
-            })
-        except Exception as exc:
-            exc_holder.append(exc)
+        for attempt in range(2):
+            try:
+                info = yf.Ticker(ticker).info or {}
+                # yfinance가 빈 dict 또는 최소 정보만 반환하는 경우 재시도
+                if info and len(info) > 5:
+                    result.update({
+                        "per":            info.get("trailingPE") or info.get("forwardPE"),
+                        "pbr":            info.get("priceToBook"),
+                        "profit_margin":  info.get("profitMargins"),
+                        "revenue_growth": info.get("revenueGrowth"),
+                        "roe":            info.get("returnOnEquity"),
+                        "debt_to_equity": info.get("debtToEquity"),
+                        "dividend_yield": info.get("dividendYield"),
+                        "sector":         info.get("sector", ""),
+                        "company_name":   info.get("longName") or info.get("shortName", ""),
+                    })
+                    return  # 성공
+                # 빈 결과면 잠깐 대기 후 재시도
+                if attempt == 0:
+                    _time.sleep(1.5)
+            except Exception as exc:
+                if attempt == 1:
+                    exc_holder.append(exc)
+                else:
+                    _time.sleep(1.5)
 
     t = _t.Thread(target=_fetch, daemon=True)
     t.start()
-    t.join(timeout=15)
-    if not result and not exc_holder:
-        logger.debug("%s yfinance 타임아웃 (15초)", ticker)
-    elif exc_holder:
-        logger.debug("%s 지표 수집 실패: %s", ticker, exc_holder[0])
+    t.join(timeout=20)
+
+    if not result:
+        if exc_holder:
+            logger.warning("%s 지표 수집 예외: %s", ticker, exc_holder[0])
+        elif t.is_alive():
+            logger.warning("%s yfinance 타임아웃 (20초)", ticker)
+        else:
+            logger.warning("%s yfinance 빈 응답 (2회 시도)", ticker)
     return result
 
 
@@ -331,8 +346,12 @@ class SectorAnalyzer:
             )
 
             if not has_data:
+                self._log(
+                    f"  → {ticker} 재무 데이터 없음 "
+                    f"(info키={len(metrics)}개, "
+                    f"per={metrics.get('per')}, pbr={metrics.get('pbr')})"
+                )
                 result["ai_summary"] = "재무 데이터 없음 (Yahoo Finance 조회 불가)"
-                self._log(f"  → {ticker} 재무 데이터 없음")
             else:
                 # 2. AI 매수 매력도 분석 (실패해도 재무 데이터만으로 저장)
                 try:
