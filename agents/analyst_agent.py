@@ -239,3 +239,43 @@ class AnalystAgent:
                 "investment_horizon": "",
                 "buy_triggers": [],
             }
+
+    # ------------------------------------------------------------------
+    # Step 5 – Multi-stock comparison & recommendation
+    # ------------------------------------------------------------------
+
+    def compare_and_recommend(self, summaries: list) -> dict:
+        """
+        Compare multiple stocks and pick the best one given current market conditions.
+        summaries: list of dicts with ticker, company_name, sector, quant_score, ai_score,
+                   total_score, per, pbr, profit_margin, undervaluation_level, grade.
+        """
+        prompt = (
+            "다음 여러 종목을 비교 분석하고, 현재 시장 상황에서 가장 투자 매력도가 높은 종목 1개를 추천해줘.\n\n"
+            f"종목 비교 데이터:\n{json.dumps(summaries, ensure_ascii=False, indent=2)}\n\n"
+            "현재 금리 환경, 섹터 모멘텀, 밸류에이션 매력도, 성장성, 재무건전성을 종합적으로 고려해서 판단해줘.\n\n"
+            "반드시 다음 JSON 형식으로 답해줘:\n"
+            "{\n"
+            '  "recommended_ticker": "추천 티커",\n'
+            '  "recommended_company": "추천 회사명",\n'
+            '  "reasoning": "추천 핵심 이유 (3~4문장, 구체적 수치 근거 포함)",\n'
+            '  "market_context": "현재 시장 상황 분석 (2문장)",\n'
+            '  "rank_list": [\n'
+            '    {"rank": 1, "ticker": "티커", "company": "회사명", "reason": "이 순위인 이유 (1문장)"},\n'
+            '    ...\n'
+            "  ],\n"
+            '  "caution": "투자 시 공통 주의사항 (1~2문장)"\n'
+            "}"
+        )
+        raw = self._chat(prompt, temperature=0.4, max_tokens=1800, json_mode=True)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {
+                "recommended_ticker": summaries[0]["ticker"] if summaries else "",
+                "recommended_company": summaries[0]["company_name"] if summaries else "",
+                "reasoning": raw,
+                "market_context": "",
+                "rank_list": [],
+                "caution": "",
+            }

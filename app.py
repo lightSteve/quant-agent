@@ -75,6 +75,16 @@ st.markdown(
         font-weight: 600;
         margin-bottom: 0.5rem;
     }
+    .recommend-banner {
+        background: linear-gradient(135deg, #1b5e20 0%, #388e3c 100%);
+        padding: 2rem 2.2rem;
+        border-radius: 12px;
+        margin-bottom: 1.4rem;
+        color: white;
+        text-align: center;
+    }
+    .recommend-banner h2 { margin: 0.4rem 0 0.6rem 0; font-size: 1.9rem; }
+    .recommend-banner p  { margin: 0.2rem 0; opacity: 0.92; font-size: 1rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -134,8 +144,8 @@ def build_sidebar() -> dict:
         if mode == "종목 코드 입력":
             ticker_input = st.text_input(
                 "종목 코드",
-                placeholder="예: 005930  AAPL  TSLA  0700.HK",
-                help="한국 주식: 6자리 코드 자동 인식 | 미국: 영문 티커",
+                placeholder="예: 005930  AAPL  TSLA  (공백/쉼표로 최대 5개)",
+                help="단일 종목: 상세 분석 | 여러 종목(공백·쉼표 구분): 비교 분석 후 AI 추천\n한국 6자리 코드 자동인식 | 미국 영문 티커",
             )
         else:
             uploaded_image = st.file_uploader(
@@ -714,6 +724,144 @@ def render_tab_investment_score(
 
 
 # ──────────────────────────────────────────────
+# Single-ticker data collection (캐시 포함, UI 없음)
+# ──────────────────────────────────────────────
+
+def _collect_ticker_data(
+    ticker_input: str,
+    api_key: str,
+    monthly_amount: float,
+    dca_years: int,
+    force_refresh: bool,
+    agent,
+    scorer,
+    on_status=None,
+) -> dict | None:
+    """단일 종목 데이터 수집 + AI 분석. Streamlit UI 없는 순수 함수.
+
+    Returns:
+        data dict (company_name, metrics, ... 포함)
+        _cache_meta 키가 있으면 캐시 히트, None이면 신규 분석
+    """
+
+    def _s(msg: str) -> None:
+        if on_status:
+            on_status(msg)
+
+    # ── 캐시 확인 ─────────────────────────────
+    if not force_refresh:
+        try:
+            resolved = FinancialDataFetcher._resolve_ticker(ticker_input)
+            if cache_manager.is_valid(resolved):
+                cached = cache_manager.load(resolved)
+                if cached:
+                    d = dict(cached["data"])
+                    d["_cache_meta"] = {
+                        "cached_at":    cached["cached_at"],
+                        "quarter":      cached["quarter"],
+                        "next_refresh": cached["next_refresh"],
+                    }
+                    return d
+        except Exception:
+            pass
+
+    # ── 데이터 수집 ───────────────────────────
+    _s(f"📡 {ticker_input} 데이터 수집 중…")
+    try:
+        fetcher = FinancialDataFetcher(ticker_input)
+        company_name = fetcher.get_company_name()
+    except Exception:
+        return None
+
+    _s(f"📊 {company_name} 재무제표 로딩…")
+    financials     = fetcher.get_financials_3yr()
+    metrics        = fetcher.get_key_metrics()
+    price_history  = fetcher.get_price_history()
+    profit_margins = fetcher.calculate_net_profit_margin()
+    sector         = fetcher.get_sector()
+    industry       = fetcher.get_industry()
+    currency       = fetcher.get_currency()
+
+    _s(f"🏭 {company_name} 동종 업계 비교…")
+    peer_df       = fetcher.get_peer_metrics()
+    peer_averages = scorer.calculate_peer_averages(peer_df)
+
+    _s(f"💰 DCA 시뮬레이션…")
+    dca_results  = fetcher.calculate_dca_comparison(monthly_amount, dca_years)
+    quant_result = scorer.calculate_score(metrics, peer_averages)
+
+    plain_summary   = ""
+    undervaluation  = {}
+    investment_data = {}
+
+    if agent:
+        _s(f"🤖 {company_name} AI 분석 중…")
+        fin_summary = _sanitize_json({
+            "company":  company_name,
+            "sector":   sector,
+            "industry": industry,
+            "metrics":  {k: v for k, v in metrics.items() if v is not None},
+            "profit_margin_trend": profit_margins.to_dict() if not profit_margins.empty else {},
+        })
+        try:
+            plain_summary = agent.summarize_financials(fin_summary)
+        except Exception as e:
+            plain_summary = f"⚠️ AI 요약 실패: {e}"
+
+        try:
+            undervaluation = agent.analyze_undervaluation(
+                metrics,
+                _sanitize_json({
+                    "peer_averages": peer_averages,
+                    "peers": peer_df.to_dict() if not peer_df.empty else {},
+                }),
+            )
+        except Exception as e:
+            undervaluation = {"summary": f"분석 실패: {e}", "is_undervalued": False}
+
+        try:
+            investment_data = agent.generate_investment_score(
+                {
+                    "company":    company_name,
+                    "sector":     sector,
+                    "metrics":    {k: v for k, v in metrics.items() if v is not None},
+                    "quant_score": quant_result["total_score"],
+                    "undervaluation": undervaluation,
+                },
+                quant_result["total_score"],
+            )
+        except Exception as e:
+            investment_data = {"ai_score": 0, "score_reasoning": f"실패: {e}"}
+
+    data: dict = {
+        "company_name":   company_name,
+        "sector":         sector,
+        "industry":       industry,
+        "currency":       currency,
+        "metrics":        metrics,
+        "financials":     financials,
+        "price_history":  price_history,
+        "profit_margins": profit_margins,
+        "peer_df":        peer_df,
+        "dca_results":    dca_results,
+        "plain_summary":  plain_summary,
+        "undervaluation": undervaluation,
+        "investment_data": investment_data,
+        "quant_result":   quant_result,
+        "image_data":     None,
+    }
+
+    # 캐시 저장 (직렬화 가능한 키만 저장)
+    try:
+        cache_manager.save(fetcher.ticker, data)
+    except Exception:
+        pass
+
+    data["_cache_meta"] = None  # 신규 분석 표시
+    return data
+
+
+# ──────────────────────────────────────────────
 # Results renderer  (live 분석 & 캐시 로드 공용)
 # ──────────────────────────────────────────────
 
@@ -794,6 +942,218 @@ def _render_results(
             quant_result, investment_data, dca_results,
             monthly_amount, dca_years, company_name, currency, bool(api_key),
         )
+
+
+# ──────────────────────────────────────────────
+# Multi-ticker comparison & AI recommendation
+# ──────────────────────────────────────────────
+
+def run_compare_analysis(cfg: dict, tickers: list[str]) -> None:
+    """2개 이상 종목을 비교 분석하고 AI 추천 종목을 선정."""
+    api_key        = cfg["api_key"]
+    monthly_amount = cfg["monthly_amount"]
+    dca_years      = cfg["dca_years"]
+    force_refresh  = cfg.get("force_refresh", False)
+
+    # 최대 5개로 제한
+    if len(tickers) > 5:
+        st.warning(f"⚠️ 최대 5개 종목까지 비교 가능합니다. 처음 5개만 분석합니다.")
+        tickers = tickers[:5]
+
+    agent  = AnalystAgent(api_key, provider=cfg.get("provider", "openai")) if api_key else None
+    scorer = QuantScorer()
+
+    st.markdown(
+        f"""
+        <div class="hero">
+          <h1>⚖️ 종목 비교 분석</h1>
+          <p>{" vs ".join(tickers)} · {len(tickers)}개 종목 퀀트 비교 & AI 추천</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # ── 각 종목 데이터 수집 ────────────────────
+    prog_ph   = st.progress(0)
+    status_ph = st.empty()
+    all_data: dict[str, dict] = {}
+    failed: list[str] = []
+
+    for i, ticker in enumerate(tickers):
+        prog_ph.progress(int(i / len(tickers) * 85))
+
+        data = _collect_ticker_data(
+            ticker, api_key, monthly_amount, dca_years, force_refresh,
+            agent, scorer,
+            on_status=lambda msg, t=ticker: status_ph.text(f"[{t}] {msg}"),
+        )
+        if data:
+            all_data[ticker] = data
+        else:
+            failed.append(ticker)
+            st.warning(f"⚠️ {ticker} 데이터 수집 실패 — 분석에서 제외됩니다.")
+
+    prog_ph.progress(88)
+    status_ph.empty()
+
+    if len(all_data) < 1:
+        st.error("분석 가능한 종목이 없습니다. 종목 코드를 확인해주세요.")
+        prog_ph.empty()
+        return
+
+    # 1개만 남은 경우 단일 분석으로 렌더링
+    if len(all_data) == 1:
+        prog_ph.empty()
+        ticker = list(all_data.keys())[0]
+        d = all_data[ticker]
+        cm = d.get("_cache_meta")
+        _render_results(d, api_key, monthly_amount, dca_years, cache_info=cm)
+        return
+
+    # ── 요약 목록 생성 (AI 비교용) ─────────────
+    summaries: list[dict] = []
+    for ticker, d in all_data.items():
+        qr  = d.get("quant_result", {})
+        inv = d.get("investment_data", {})
+        ai_score = float(inv.get("ai_score", 0)) if inv else 0.0
+        m = d.get("metrics", {})
+        summaries.append({
+            "ticker":             ticker,
+            "company_name":       d["company_name"],
+            "sector":             d["sector"],
+            "quant_score":        round(qr.get("total_score", 0), 2),
+            "ai_score":           round(ai_score, 1),
+            "total_score":        round(qr.get("total_score", 0) + ai_score, 2),
+            "per":                m.get("pe_ratio"),
+            "pbr":                m.get("pb_ratio"),
+            "profit_margin":      m.get("profit_margin"),
+            "undervaluation_level": d.get("undervaluation", {}).get("undervaluation_level", ""),
+            "grade":              qr.get("grade", ""),
+        })
+
+    summaries.sort(key=lambda x: x["total_score"], reverse=True)
+
+    # ── AI 비교 추천 ─────────────────────────
+    recommendation: dict = {}
+    if agent:
+        status_ph.text("🤖 AI 종목 비교 및 최적 추천 분석 중…")
+        try:
+            recommendation = agent.compare_and_recommend(summaries)
+        except Exception as e:
+            recommendation = {
+                "recommended_ticker":  summaries[0]["ticker"],
+                "recommended_company": summaries[0]["company_name"],
+                "reasoning": f"AI 추천 분석 실패: {e}",
+                "market_context": "",
+                "rank_list": [],
+                "caution": "",
+            }
+        status_ph.empty()
+
+    prog_ph.progress(100)
+    prog_ph.empty()
+
+    # ── 추천 배너 ─────────────────────────────
+    rec_ticker  = recommendation.get("recommended_ticker", "")
+    rec_company = recommendation.get("recommended_company", "")
+
+    if rec_company:
+        st.markdown(
+            f"""
+            <div class="recommend-banner">
+              <div style="font-size:2.5rem; margin-bottom:0.3rem">🏆</div>
+              <h2>AI 추천 종목: {rec_company}</h2>
+              <p>{recommendation.get("market_context", "")}</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div class="card">{recommendation.get("reasoning", "")}</div>',
+            unsafe_allow_html=True,
+        )
+        if recommendation.get("caution"):
+            st.warning(f"⚠️ {recommendation['caution']}")
+
+    st.markdown("---")
+
+    # ── 비교 테이블 ───────────────────────────
+    st.subheader("📊 종목별 퀀트 점수 비교")
+    medals = ["🥇", "🥈", "🥉", "④", "⑤"]
+    rows = []
+    for idx, s in enumerate(summaries):
+        rows.append({
+            "순위":          medals[idx] if idx < len(medals) else str(idx + 1),
+            "종목코드":       s["ticker"],
+            "회사명":         s["company_name"],
+            "섹터":           s["sector"],
+            "퀀트점수(5점)":  f"{s['quant_score']:.2f}",
+            "AI점수(5점)":    f"{s['ai_score']:.1f}" if s["ai_score"] > 0 else "-",
+            "종합점수(10점)": f"{s['total_score']:.1f}",
+            "PER":           f"{s['per']:.1f}" if s["per"] else "-",
+            "PBR":           f"{s['pbr']:.2f}" if s["pbr"] else "-",
+            "저평가":         s["undervaluation_level"] or "-",
+            "등급":           s["grade"],
+        })
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    # ── 점수 비교 차트 ────────────────────────
+    companies    = [s["company_name"] for s in summaries]
+    quant_scores = [s["quant_score"] for s in summaries]
+    ai_scores    = [s["ai_score"] for s in summaries]
+    bar_colors   = [
+        "#2e7d32" if (s["ticker"] == rec_ticker or s["company_name"] == rec_company)
+        else "#1e4d7b"
+        for s in summaries
+    ]
+
+    fig_bar = go.Figure()
+    fig_bar.add_trace(go.Bar(
+        name="퀀트점수", x=companies, y=quant_scores,
+        marker_color=bar_colors, text=[f"{v:.2f}" for v in quant_scores],
+        textposition="inside",
+    ))
+    if any(s["ai_score"] > 0 for s in summaries):
+        fig_bar.add_trace(go.Bar(
+            name="AI점수", x=companies, y=ai_scores,
+            marker_color="#66bb6a",
+            text=[f"{v:.1f}" if v > 0 else "" for v in ai_scores],
+            textposition="inside",
+        ))
+    fig_bar.add_hline(y=5, line_dash="dot", line_color="orange",
+                      annotation_text="5점 기준선")
+    fig_bar.update_layout(
+        title="종목별 종합 점수 비교 (초록=AI 추천)",
+        barmode="stack",
+        height=380,
+        yaxis=dict(range=[0, 10], title="점수"),
+        showlegend=True,
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+    # ── AI 순위 근거 ──────────────────────────
+    if recommendation.get("rank_list"):
+        st.markdown("#### 🤖 AI 종합 순위 근거")
+        for item in recommendation["rank_list"]:
+            medal = medals[item["rank"] - 1] if 1 <= item["rank"] <= len(medals) else f"{item['rank']}위"
+            st.markdown(f"**{medal} {item['rank']}위 — {item['company']}** (`{item['ticker']}`)")
+            st.caption(f"↪ {item.get('reason', '')}")
+
+    st.markdown("---")
+
+    # ── 종목별 상세 분석 (expanders) ──────────
+    st.subheader("🔎 종목별 상세 분석")
+    for s in summaries:
+        ticker = s["ticker"]
+        d      = all_data[ticker]
+        is_rec = ticker == rec_ticker or s["company_name"] == rec_company
+        label  = f"{'⭐ ' if is_rec else ''}{ticker} — {s['company_name']}"
+        if is_rec:
+            label += " (AI 추천)"
+
+        with st.expander(label, expanded=is_rec):
+            cm = d.get("_cache_meta")
+            _render_results(d, api_key, monthly_amount, dca_years, cache_info=cm)
 
 
 # ──────────────────────────────────────────────
@@ -1002,7 +1362,13 @@ def main() -> None:
     cfg = build_sidebar()
 
     if cfg["analyze"]:
-        run_analysis(cfg)
+        ticker_raw = (cfg.get("ticker_input") or "").strip()
+        tickers = [t for t in ticker_raw.replace(",", " ").split() if t]
+
+        if len(tickers) > 1:
+            run_compare_analysis(cfg, tickers)
+        else:
+            run_analysis(cfg)
     else:
         show_welcome()
 
