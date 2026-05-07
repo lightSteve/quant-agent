@@ -1369,8 +1369,9 @@ def run_analysis(cfg: dict) -> None:
 # 섹터 전수 분석 탭
 # ──────────────────────────────────────────────
 
-def render_sector_tab(api_key: str) -> None:  # noqa: C901
+def render_sector_tab(cfg: dict) -> None:  # noqa: C901
     """KOSPI 전 종목 백그라운드 AI 분석 결과 UI."""
+    api_key = cfg.get("api_key", "")
     init_db()
     analyzer = get_analyzer()
 
@@ -1544,57 +1545,117 @@ def render_sector_tab(api_key: str) -> None:  # noqa: C901
     if selected:
         idx = options.index(selected)
         r = results[idx]
+        ticker_code = r["ticker"]
+        company_name_sel = r["company_name"]
 
-        score = r.get("appeal_score")
-        score_display = f"{score:.1f}" if score is not None else "-"
-        color = (
-            "#2e7d32" if score and score >= 7
-            else "#f57f17" if score and score >= 5
-            else "#c62828"
-        )
-
-        d1, d2, d3, d4 = st.columns(4)
-        with d1:
-            st.markdown(
-                f"<div style='text-align:center'>"
-                f"<span style='font-size:2.4rem;font-weight:bold;color:{color}'>"
-                f"{score_display}</span><br>"
-                f"<span style='font-size:0.8rem;color:#888'>매수 매력도</span>"
-                f"</div>",
-                unsafe_allow_html=True,
-            )
-        with d2:
-            st.metric("PER", f"{r['per']:.1f}" if r.get("per") else "-")
-        with d3:
-            st.metric("PBR", f"{r['pbr']:.2f}" if r.get("pbr") else "-")
-        with d4:
-            m = r.get("profit_margin")
-            st.metric("순이익마진", f"{m*100:.1f}%" if m else "-")
+        # 종목이 바뀌면 이전 분석 결과 초기화
+        if st.session_state.get("sector_detail_ticker") != ticker_code:
+            st.session_state.pop("sector_detail_data", None)
 
         st.markdown(
-            f"**섹터:** {r.get('sector_kr') or r.get('sector') or '-'} &nbsp;|&nbsp; "
-            f"**투자기간:** {r.get('investment_horizon') or '-'}"
+            f"**{company_name_sel}** `{ticker_code}` — "
+            f"섹터: {r.get('sector_kr') or r.get('sector') or '-'}"
         )
 
-        if r.get("buy_signal"):
-            st.success("✅ 매수 신호 감지")
+        if st.button(
+            f"🔍 {company_name_sel} 개별 상세 분석 실행",
+            key="sector_detail_run_btn",
+            type="primary",
+            use_container_width=True,
+        ):
+            agent  = AnalystAgent(api_key, provider="github") if api_key else None
+            scorer = QuantScorer()
+            monthly_amount = cfg.get("monthly_amount", 300_000)
+            dca_years      = cfg.get("dca_years", 3)
+            force_refresh  = cfg.get("force_refresh", False)
+
+            status_ph = st.empty()
+
+            with st.spinner(f"{company_name_sel} 전체 분석 중…"):
+                data = _collect_ticker_data(
+                    ticker_code,
+                    api_key,
+                    monthly_amount,
+                    dca_years,
+                    force_refresh,
+                    agent,
+                    scorer,
+                    on_status=lambda msg: status_ph.text(msg),
+                )
+
+            status_ph.empty()
+
+            if data:
+                st.session_state["sector_detail_ticker"] = ticker_code
+                st.session_state["sector_detail_data"] = data
+            else:
+                st.error(
+                    f"❌ {company_name_sel}({ticker_code}) 데이터 수집 실패. "
+                    "종목 코드를 확인하거나 잠시 후 다시 시도해주세요."
+                )
+
+        # 분석 완료된 데이터가 있으면 전체 리포트 렌더링
+        detail_data = st.session_state.get("sector_detail_data")
+        if detail_data and st.session_state.get("sector_detail_ticker") == ticker_code:
+            cm = detail_data.get("_cache_meta")
+            _render_results(
+                detail_data,
+                api_key,
+                cfg.get("monthly_amount", 300_000),
+                cfg.get("dca_years", 3),
+                cache_info=cm,
+            )
         else:
-            st.info("⚪ 매수 신호 없음")
+            # 버튼 클릭 전 — 섹터 분석에서 저장된 요약 미리보기
+            score = r.get("appeal_score")
+            score_display = f"{score:.1f}" if score is not None else "-"
+            color = (
+                "#2e7d32" if score and score >= 7
+                else "#f57f17" if score and score >= 5
+                else "#c62828"
+            )
+            d1, d2, d3, d4 = st.columns(4)
+            with d1:
+                st.markdown(
+                    f"<div style='text-align:center'>"
+                    f"<span style='font-size:2.4rem;font-weight:bold;color:{color}'>"
+                    f"{score_display}</span><br>"
+                    f"<span style='font-size:0.8rem;color:#888'>매수 매력도</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+            with d2:
+                st.metric("PER", f"{r['per']:.1f}" if r.get("per") else "-")
+            with d3:
+                st.metric("PBR", f"{r['pbr']:.2f}" if r.get("pbr") else "-")
+            with d4:
+                m = r.get("profit_margin")
+                st.metric("순이익마진", f"{m*100:.1f}%" if m else "-")
 
-        if r.get("ai_summary"):
-            st.markdown("**AI 종합 판단**")
-            st.markdown(r["ai_summary"])
+            st.markdown(
+                f"**투자기간:** {r.get('investment_horizon') or '-'}"
+            )
 
-        cs, cr = st.columns(2)
-        with cs:
-            if r.get("key_strength"):
-                st.success(f"💪 강점: {r['key_strength']}")
-        with cr:
-            if r.get("key_risk"):
-                st.error(f"⚠️ 위험: {r['key_risk']}")
+            if r.get("buy_signal"):
+                st.success("✅ 매수 신호 감지")
+            else:
+                st.info("⚪ 매수 신호 없음")
 
-        if r.get("analyzed_at"):
-            st.caption(f"분석 시각: {str(r['analyzed_at'])[:19]}")
+            if r.get("ai_summary"):
+                st.markdown("**AI 종합 판단**")
+                st.markdown(r["ai_summary"])
+
+            cs, cr = st.columns(2)
+            with cs:
+                if r.get("key_strength"):
+                    st.success(f"💪 강점: {r['key_strength']}")
+            with cr:
+                if r.get("key_risk"):
+                    st.error(f"⚠️ 위험: {r['key_risk']}")
+
+            if r.get("analyzed_at"):
+                st.caption(f"분석 시각: {str(r['analyzed_at'])[:19]}")
+            st.caption("↑ 위 버튼을 클릭하면 재무 차트·AI 전체 리포트를 개별 분석과 동일하게 표시합니다.")
 
 
 # ──────────────────────────────────────────────
@@ -1605,7 +1666,7 @@ def main() -> None:
     cfg = build_sidebar()
 
     if cfg["page"] == "🔭 섹터 전수 분석":
-        render_sector_tab(cfg["api_key"])
+        render_sector_tab(cfg)
         return
 
     if cfg["analyze"]:
