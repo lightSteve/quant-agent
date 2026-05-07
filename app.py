@@ -1536,6 +1536,7 @@ def render_sector_tab(api_key: str) -> None:  # noqa: C901
         r = results[idx]
 
         score = r.get("appeal_score")
+        score_display = f"{score:.1f}" if score is not None else "-"
         color = (
             "#2e7d32" if score and score >= 7
             else "#f57f17" if score and score >= 5
@@ -1547,7 +1548,7 @@ def render_sector_tab(api_key: str) -> None:  # noqa: C901
             st.markdown(
                 f"<div style='text-align:center'>"
                 f"<span style='font-size:2.4rem;font-weight:bold;color:{color}'>"
-                f"{score:.1f}</span><br>"
+                f"{score_display}</span><br>"
                 f"<span style='font-size:0.8rem;color:#888'>매수 매력도</span>"
                 f"</div>",
                 unsafe_allow_html=True,
