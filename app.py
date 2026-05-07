@@ -119,6 +119,86 @@ def _sanitize_json(obj):
     return obj
 
 
+def _make_fallback_summary(metrics: dict, profit_margins, company_name: str, sector: str) -> str:
+    """API 호출 없이 수집된 재무 지표로 규칙 기반 한국어 요약을 생성."""
+    lines: list[str] = [f"### 📊 {company_name} 재무 요약 _(AI 요약 불가 — 규칙 기반 자동 생성)_\n"]
+
+    # 질문 1: 수익성 추세
+    pm = metrics.get("profit_margin")
+    roe = metrics.get("roe")
+    pm_trend: list[float] = []
+    if profit_margins is not None and hasattr(profit_margins, "__iter__") and len(profit_margins) > 0:
+        try:
+            pm_trend = [v for v in profit_margins.values() if v is not None]
+        except Exception:
+            pm_trend = []
+
+    q1_parts: list[str] = []
+    if pm is not None:
+        pct = pm * 100
+        q1_parts.append(f"현재 순이익률은 **{pct:.1f}%** 입니다.")
+        if pct >= 10:
+            q1_parts.append("비교적 높은 수익성을 유지하고 있습니다.")
+        elif pct >= 0:
+            q1_parts.append("수익은 내고 있으나 마진이 얇습니다.")
+        else:
+            q1_parts.append("현재 순손실 상태입니다.")
+    if len(pm_trend) >= 2:
+        diff = pm_trend[-1] - pm_trend[0]
+        if diff > 0.01:
+            q1_parts.append("최근 수익성이 개선되는 추세입니다.")
+        elif diff < -0.01:
+            q1_parts.append("최근 수익성이 악화되는 추세입니다.")
+    if roe is not None:
+        q1_parts.append(f"ROE는 **{roe*100:.1f}%** 로 자기자본 활용 효율을 나타냅니다.")
+    lines.append("**질문 1. 돈을 예전보다 잘 벌고 있는가?**")
+    lines.append(" ".join(q1_parts) if q1_parts else "수익성 데이터가 부족합니다.")
+
+    # 질문 2: 부채·유동성
+    de = metrics.get("debt_to_equity")
+    cr = metrics.get("current_ratio")
+    q2_parts: list[str] = []
+    if de is not None:
+        if de < 1.0:
+            q2_parts.append(f"부채비율(D/E) **{de:.2f}**로 재무 안정성이 양호합니다.")
+        elif de < 2.0:
+            q2_parts.append(f"부채비율(D/E) **{de:.2f}**로 보통 수준입니다.")
+        else:
+            q2_parts.append(f"부채비율(D/E) **{de:.2f}**로 부채 부담이 높습니다.")
+    if cr is not None:
+        if cr >= 2.0:
+            q2_parts.append(f"유동비율 **{cr:.2f}**로 단기 상환 능력이 충분합니다.")
+        elif cr >= 1.0:
+            q2_parts.append(f"유동비율 **{cr:.2f}**로 단기 유동성은 적정 수준입니다.")
+        else:
+            q2_parts.append(f"유동비율 **{cr:.2f}**로 단기 유동성에 주의가 필요합니다.")
+    lines.append("\n**질문 2. 빚은 적절하게 관리되고 있는가?**")
+    lines.append(" ".join(q2_parts) if q2_parts else "부채 관련 데이터가 부족합니다.")
+
+    # 질문 3: 밸류에이션 & 성장
+    per = metrics.get("pe_ratio")
+    pbr = metrics.get("pb_ratio")
+    rg = metrics.get("revenue_growth")
+    q3_parts: list[str] = []
+    if per is not None and per > 0:
+        if per < 10:
+            q3_parts.append(f"PER **{per:.1f}배**로 저평가 가능성이 있습니다.")
+        elif per < 25:
+            q3_parts.append(f"PER **{per:.1f}배**로 적정 밸류에이션 구간입니다.")
+        else:
+            q3_parts.append(f"PER **{per:.1f}배**로 고평가 가능성이 있습니다.")
+    if pbr is not None:
+        q3_parts.append(f"PBR **{pbr:.2f}배** 수준입니다.")
+    if rg is not None:
+        q3_parts.append(f"최근 매출 성장률은 **{rg*100:.1f}%** 입니다.")
+    q3_parts.append(f"섹터: {sector}")
+    lines.append("\n**질문 3. 최근 실적 성장의 핵심 원인은 무엇인가?**")
+    lines.append(" ".join(q3_parts) if q3_parts else "성장 관련 데이터가 부족합니다.")
+
+    lines.append("\n> ⚠️ _API 속도 제한으로 AI 요약을 생성할 수 없어 수집된 수치 기반으로 자동 생성되었습니다._")
+    return "\n\n".join(lines)
+
+
 # ──────────────────────────────────────────────
 # Sidebar
 # ──────────────────────────────────────────────
@@ -817,7 +897,8 @@ def _collect_ticker_data(
         try:
             plain_summary = agent.summarize_financials(fin_summary)
         except Exception as e:
-            plain_summary = f"⚠️ AI 요약 실패: {e}"
+            plain_summary = _make_fallback_summary(metrics, profit_margins, company_name, sector)
+            _s(f"⚠️ AI 요약 실패 ({e}) — 자동 요약으로 대체")
 
         try:
             undervaluation = agent.analyze_undervaluation(
@@ -1276,7 +1357,10 @@ def run_analysis(cfg: dict) -> None:
         try:
             plain_summary = agent.summarize_financials(fin_summary)
         except Exception as e:
-            plain_summary = f"⚠️ AI 요약 실패: {e}"
+            plain_summary = _make_fallback_summary(
+                metrics, profit_margins if fetcher else None, company_name, sector
+            )
+            status.text(f"⚠️ AI 요약 실패 — 자동 요약으로 대체 ({e})")
 
         if fetcher:
             progress.progress(75)
