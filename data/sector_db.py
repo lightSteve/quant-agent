@@ -67,17 +67,24 @@ def init_db() -> None:
 
 
 def add_stocks_to_queue(stocks: List[Dict[str, Any]]) -> int:
-    """큐에 종목 추가. 이미 있는 종목(ticker)은 건너뜀. 반환값: 신규 추가 수."""
-    added = 0
+    """
+    큐에 종목 추가.
+    - 신규 종목: pending으로 삽입
+    - 기존 종목: status를 pending으로 리셋 (재분석 대상으로 복구)
+    반환값: 처리된 종목 수
+    """
     now = datetime.now().isoformat()
     with _write_lock:
         with _conn() as conn:
             for s in stocks:
                 conn.execute(
                     """
-                    INSERT OR IGNORE INTO stock_queue
+                    INSERT INTO stock_queue
                         (ticker, company_name, sector, market, priority, status, added_at)
                     VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                    ON CONFLICT(ticker) DO UPDATE SET
+                        status = CASE WHEN status = 'in_progress' THEN 'in_progress' ELSE 'pending' END,
+                        added_at = excluded.added_at
                     """,
                     (
                         s["ticker"],
@@ -88,15 +95,15 @@ def add_stocks_to_queue(stocks: List[Dict[str, Any]]) -> int:
                         now,
                     ),
                 )
-                if conn.execute("SELECT changes()").fetchone()[0]:
-                    added += 1
-    return added
+    return len(stocks)
 
 
 def get_next_pending(reanalysis_days: int = 7) -> Optional[Dict[str, Any]]:
     """
     분석 대기 종목 1개 반환 (우선순위 오름차순).
-    이미 분석됐더라도 reanalysis_days 이전이면 재분석 대상.
+    - status='pending' 인 종목 (분석 미완료)
+    - status='done' 이면서 analyzed_at이 reanalysis_days 보다 오래된 종목 (재분석)
+    in_progress 상태는 현재 처리 중이므로 제외.
     """
     cutoff = (datetime.now() - timedelta(days=reanalysis_days)).isoformat()
     with _conn() as conn:
@@ -105,7 +112,7 @@ def get_next_pending(reanalysis_days: int = 7) -> Optional[Dict[str, Any]]:
             SELECT q.ticker, q.company_name, q.sector, q.market
             FROM   stock_queue q
             LEFT JOIN sector_analysis a ON q.ticker = a.ticker
-            WHERE  q.status = 'pending'
+            WHERE  q.status != 'in_progress'
               AND  (a.ticker IS NULL OR a.analyzed_at < ?)
             ORDER BY q.priority ASC
             LIMIT 1
