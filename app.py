@@ -315,7 +315,7 @@ def render_tab_financials(
         fig.update_yaxes(title_text="억원", row=1, col=2)
         fig.update_yaxes(title_text="%",    row=2, col=1)
         fig.update_layout(height=560, showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key=f"chart_financials_{company_name}")
 
         with st.expander("📋 원본 재무 수치 (억원 단위)"):
             disp = financials.copy()
@@ -349,7 +349,7 @@ def render_tab_financials(
                            marker_color=["#1e4d7b", "#2e7d32", "#c62828"][i % 3])
                 )
             fig2.update_layout(barmode="group", title=f"재무 추이 ({unit})", height=380)
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, use_container_width=True, key=f"chart_financials2_{company_name}")
         st.json(image_data)
     else:
         st.info("재무 데이터를 불러올 수 없습니다.")
@@ -375,7 +375,7 @@ def render_tab_financials(
             fig_p.add_hline(y=l52, line_dash="dash", line_color="#c62828",
                             annotation_text=f"52주 최저 {l52:,.1f}")
         fig_p.update_layout(height=360, hovermode="x unified", xaxis_title="날짜")
-        st.plotly_chart(fig_p, use_container_width=True)
+        st.plotly_chart(fig_p, use_container_width=True, key=f"chart_price_{company_name}")
 
 
 # ──────────────────────────────────────────────
@@ -496,7 +496,7 @@ def render_tab_undervaluation(
                     fig.add_hline(y=ref_line, line_dash="dot", line_color="red",
                                   annotation_text=f"기준 {ref_line}")
                 fig.update_layout(title=title, height=280, showlegend=False)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key=f"chart_peer_{metric_col}_{company_name}")
 
             _peer_chart("pe_ratio", "PER 비교")
             _peer_chart("pb_ratio", "PBR 비교", ref_line=1.0)
@@ -607,7 +607,7 @@ def render_tab_investment_score(
         )
     )
     fig_gauge.update_layout(height=300)
-    st.plotly_chart(fig_gauge, use_container_width=True)
+    st.plotly_chart(fig_gauge, use_container_width=True, key=f"chart_gauge_{company_name}")
 
     # Investment thesis & DCA recommendation
     if investment_data and has_api_key:
@@ -649,7 +649,7 @@ def render_tab_investment_score(
                     )
                 )
                 fig_pie.update_layout(height=280, showlegend=False)
-                st.plotly_chart(fig_pie, use_container_width=True)
+                st.plotly_chart(fig_pie, use_container_width=True, key=f"chart_pie_{company_name}")
 
                 rationale = dca_rec.get("rationale", "")
                 strategy = dca_rec.get("dca_strategy", "")
@@ -718,7 +718,7 @@ def render_tab_investment_score(
                 xaxis_title="날짜", yaxis_title="성과 지수",
                 height=380, hovermode="x unified",
             )
-            st.plotly_chart(fig_dca, use_container_width=True)
+            st.plotly_chart(fig_dca, use_container_width=True, key=f"chart_dca_{company_name}")
     else:
         st.info("종목 코드 입력 시 DCA 시뮬레이션이 계산됩니다.")
 
