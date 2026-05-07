@@ -1,0 +1,17 @@
+# 환경 변수 (절대 GitHub에 올리면 안 됨)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit 로컬 설정
+.streamlit/secrets.toml
