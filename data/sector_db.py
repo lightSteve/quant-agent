@@ -54,20 +54,28 @@ def _get_cursor() -> Generator:
         import urllib.parse
         import psycopg2
         import psycopg2.extras
-        # Python 3.14에서 urlparse().hostname 이 IP 검증을 해서 ValueError 발생
-        # netloc을 직접 파싱해 우회
-        _p = urllib.parse.urlparse(_PG_URL)
-        _userinfo, _, _hostinfo = _p.netloc.rpartition("@")
-        _host_parts = _hostinfo.rsplit(":", 1)
-        _host = _host_parts[0]
-        _port = int(_host_parts[1]) if len(_host_parts) > 1 else 6543
-        _raw_user, _, _raw_pass = _userinfo.partition(":")
+        # Python 3.14 urlparse가 비밀번호 내 대괄호를 IPv6로 잘못 해석 → 직접 파싱
+        _url = _PG_URL
+        if _url.startswith("postgresql://"):
+            _url = _url[len("postgresql://"):]
+        elif _url.startswith("postgres://"):
+            _url = _url[len("postgres://"):]
+        _at = _url.rfind("@")                        # 마지막 @ 기준으로 분리
+        _userinfo = _url[:_at]
+        _hostinfo  = _url[_at + 1:]
+        _ci = _userinfo.index(":")                   # 첫 번째 : 기준으로 user/pass
+        _pg_user = urllib.parse.unquote(_userinfo[:_ci])
+        _pg_pass = urllib.parse.unquote(_userinfo[_ci + 1:])
+        _host, _, _rest = _hostinfo.partition(":")
+        _port_s, _, _dbname = _rest.partition("/")
+        _pg_port = int(_port_s) if _port_s.isdigit() else 6543
+        _pg_db   = _dbname or "postgres"
         conn = psycopg2.connect(
             host=_host,
-            port=_port,
-            user=urllib.parse.unquote(_raw_user),
-            password=urllib.parse.unquote(_raw_pass),
-            dbname=(_p.path or "/postgres").lstrip("/"),
+            port=_pg_port,
+            user=_pg_user,
+            password=_pg_pass,
+            dbname=_pg_db,
             connect_timeout=10,
             sslmode="require",
         )
