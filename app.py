@@ -1496,12 +1496,23 @@ def render_sector_tab(cfg: dict) -> None:  # noqa: C901
     with col_reset:
         if st.button("🗑 전체 초기화", use_container_width=True,
                      help="큐와 분석 결과를 모두 삭제합니다 (주의)"):
-            from data.sector_db import reset_all
-            reset_all()
-            if analyzer.is_running():
-                analyzer.stop()
-            st.toast("초기화 완료")
-            st.rerun()
+            st.session_state["confirm_reset_pending"] = True
+        if st.session_state.get("confirm_reset_pending"):
+            st.warning("⚠️ **정말 삭제하시겠습니까?** 모든 분석 결과와 큐가 영구 삭제됩니다.")
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                if st.button("✅ 예, 삭제합니다", use_container_width=True, type="primary", key="confirm_reset_yes"):
+                    from data.sector_db import reset_all
+                    reset_all()
+                    if analyzer.is_running():
+                        analyzer.stop()
+                    st.session_state.pop("confirm_reset_pending", None)
+                    st.toast("초기화 완료")
+                    st.rerun()
+            with rc2:
+                if st.button("❌ 취소", use_container_width=True, key="confirm_reset_no"):
+                    st.session_state.pop("confirm_reset_pending", None)
+                    st.rerun()
 
     with col_refresh:
         if st.button("🔄 새로고침", use_container_width=True,
@@ -1545,11 +1556,14 @@ def render_sector_tab(cfg: dict) -> None:  # noqa: C901
 
     # ── 디버그 정보 ──────────────────────────
     with st.expander("🔧 디버그 / 실시간 로그", expanded=(analyzed == 0 and running)):
-        from data.sector_db import DB_PATH
+        from data.sector_db import DB_PATH, _USE_PG
         import os
+        if _USE_PG:
+            db_info = "PostgreSQL (Supabase) — 영구 저장"
+        else:
+            db_info = f"SQLite: {DB_PATH} (존재: {os.path.exists(DB_PATH)})"
         st.code(
-            f"DB 경로: {DB_PATH}\n"
-            f"DB 파일 존재: {os.path.exists(DB_PATH)}\n"
+            f"DB 백엔드: {db_info}\n"
             f"워커 실행 중: {running}\n"
             f"큐 통계: {stats}\n"
             f"마지막 오류: {analyzer.last_error or '없음'}"
