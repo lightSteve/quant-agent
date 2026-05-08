@@ -375,7 +375,10 @@ def get_sectors() -> List[str]:
     with _get_cursor() as cur:
         cur.execute(
             "SELECT DISTINCT COALESCE(NULLIF(sector_kr,''), sector) AS s "
-            "FROM sector_analysis WHERE s IS NOT NULL AND s != '' ORDER BY s"
+            "FROM sector_analysis "
+            "WHERE COALESCE(NULLIF(sector_kr,''), sector) IS NOT NULL "
+            "  AND COALESCE(NULLIF(sector_kr,''), sector) != '' "
+            "ORDER BY s"
         )
         rows = cur.fetchall()
         return [_row_to_dict(r).get("s", "") for r in rows if r]
