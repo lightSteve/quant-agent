@@ -53,7 +53,11 @@ def _get_cursor() -> Generator:
     if _USE_PG:
         import psycopg2
         import psycopg2.extras
-        conn = psycopg2.connect(_PG_URL, connect_timeout=10)
+        conn = psycopg2.connect(
+            _PG_URL,
+            connect_timeout=10,
+            sslmode="require",
+        )
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         try:
             yield cur
