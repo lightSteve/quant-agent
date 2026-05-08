@@ -51,10 +51,16 @@ else:
 def _get_cursor() -> Generator:
     """백엔드에 맞는 DB 커서를 열고 자동 commit / rollback / close."""
     if _USE_PG:
+        import urllib.parse
         import psycopg2
         import psycopg2.extras
+        _parsed = urllib.parse.urlparse(_PG_URL)
         conn = psycopg2.connect(
-            _PG_URL,
+            host=_parsed.hostname,
+            port=_parsed.port or 6543,
+            user=urllib.parse.unquote(_parsed.username or ""),
+            password=urllib.parse.unquote(_parsed.password or ""),
+            dbname=(_parsed.path or "/postgres").lstrip("/"),
             connect_timeout=10,
             sslmode="require",
         )
