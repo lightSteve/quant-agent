@@ -70,6 +70,8 @@ def _get_cursor() -> Generator:
         _port_s, _, _dbname = _rest.partition("/")
         _pg_port = int(_port_s) if _port_s.isdigit() else 6543
         _pg_db   = _dbname or "postgres"
+        import sys
+        print(f"[DB DEBUG] user={_pg_user!r} host={_host!r} port={_pg_port} db={_pg_db!r}", file=sys.stderr)
         conn = psycopg2.connect(
             host=_host,
             port=_pg_port,
