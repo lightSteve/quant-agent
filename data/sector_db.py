@@ -54,13 +54,20 @@ def _get_cursor() -> Generator:
         import urllib.parse
         import psycopg2
         import psycopg2.extras
-        _parsed = urllib.parse.urlparse(_PG_URL)
+        # Python 3.14에서 urlparse().hostname 이 IP 검증을 해서 ValueError 발생
+        # netloc을 직접 파싱해 우회
+        _p = urllib.parse.urlparse(_PG_URL)
+        _userinfo, _, _hostinfo = _p.netloc.rpartition("@")
+        _host_parts = _hostinfo.rsplit(":", 1)
+        _host = _host_parts[0]
+        _port = int(_host_parts[1]) if len(_host_parts) > 1 else 6543
+        _raw_user, _, _raw_pass = _userinfo.partition(":")
         conn = psycopg2.connect(
-            host=_parsed.hostname,
-            port=_parsed.port or 6543,
-            user=urllib.parse.unquote(_parsed.username or ""),
-            password=urllib.parse.unquote(_parsed.password or ""),
-            dbname=(_parsed.path or "/postgres").lstrip("/"),
+            host=_host,
+            port=_port,
+            user=urllib.parse.unquote(_raw_user),
+            password=urllib.parse.unquote(_raw_pass),
+            dbname=(_p.path or "/postgres").lstrip("/"),
             connect_timeout=10,
             sslmode="require",
         )
