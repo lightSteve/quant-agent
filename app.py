@@ -1756,38 +1756,63 @@ def render_sector_tab(cfg: dict) -> None:  # noqa: C901
         ]
 
     df = pd.DataFrame(filtered_results)
-    col_map = {
+    keep_cols = [
+        "company_name", "ticker", "sector_kr",
+        "per", "pbr", "profit_margin", "revenue_growth",
+        "appeal_score", "buy_signal", "investment_horizon", "analyzed_at",
+    ]
+    df_disp = df[[c for c in keep_cols if c in df.columns]].copy()
+
+    # 숫자형 보장 (정렬이 숫자 기준으로 동작하게)
+    for num_col in ("per", "pbr", "profit_margin", "revenue_growth", "appeal_score"):
+        if num_col in df_disp.columns:
+            df_disp[num_col] = pd.to_numeric(df_disp[num_col], errors="coerce")
+
+    # 순이익마진 · 매출성장률: 0~1 비율 → 퍼센트 실수로 변환 (정렬·표시 모두 %)
+    for pct_col in ("profit_margin", "revenue_growth"):
+        if pct_col in df_disp.columns:
+            df_disp[pct_col] = df_disp[pct_col] * 100
+
+    # 분석일 앞 10자리만
+    if "analyzed_at" in df_disp.columns:
+        df_disp["analyzed_at"] = df_disp["analyzed_at"].apply(
+            lambda x: str(x)[:10] if x else None
+        )
+
+    # 컬럼 표시명
+    df_disp.rename(columns={
         "company_name":       "종목명",
         "ticker":             "코드",
         "sector_kr":          "섹터",
         "per":                "PER",
         "pbr":                "PBR",
-        "profit_margin":      "순이익마진",
-        "appeal_score":       "매력도(0-10)",
+        "profit_margin":      "순이익마진(%)",
+        "revenue_growth":     "매출성장률(%)",
+        "appeal_score":       "매력도",
         "buy_signal":         "매수신호",
         "investment_horizon": "투자기간",
         "analyzed_at":        "분석일",
+    }, inplace=True)
+
+    # column_config: 숫자형 포맷은 여기서만 지정 → 원본 float 유지로 정렬 정확
+    col_cfg = {
+        "PER":          st.column_config.NumberColumn("PER",        format="%.1f"),
+        "PBR":          st.column_config.NumberColumn("PBR",        format="%.2f"),
+        "순이익마진(%)": st.column_config.NumberColumn("순이익마진(%)", format="%.1f%%"),
+        "매출성장률(%)": st.column_config.NumberColumn("매출성장률(%)", format="%.1f%%"),
+        "매력도":        st.column_config.NumberColumn("매력도(0-10)", format="%.1f"),
+        "매수신호":      st.column_config.CheckboxColumn("매수신호"),
+        "분석일":        st.column_config.TextColumn("분석일"),
     }
-    df_disp = df[[c for c in col_map if c in df.columns]].rename(columns=col_map)
 
-    def _fmt(col, fn):
-        if col in df_disp.columns:
-            df_disp[col] = df_disp[col].apply(fn)
-
-    _fmt("PER",          lambda x: f"{x:.1f}" if pd.notna(x) else "-")
-    _fmt("PBR",          lambda x: f"{x:.2f}" if pd.notna(x) else "-")
-    _fmt("순이익마진",   lambda x: f"{float(x)*100:.1f}%" if pd.notna(x) else "-")
-    _fmt("매력도(0-10)", lambda x: f"{x:.1f}" if pd.notna(x) else "-")
-    _fmt("매수신호",     lambda x: "✅ 매수" if x else "⚪")
-    _fmt("분석일",       lambda x: str(x)[:10] if x else "-")
-
-    st.caption("💡 행을 클릭하면 해당 종목의 분석 결과를 아래에 바로 표시합니다.")
+    st.caption("💡 행을 클릭하면 해당 종목의 분석 결과를 아래에 바로 표시합니다. 컬럼 헤더 클릭으로 정렬 가능.")
     table_event = st.dataframe(
         df_disp,
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
+        column_config=col_cfg,
         key="sector_results_table",
     )
 
