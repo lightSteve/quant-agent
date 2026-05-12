@@ -61,16 +61,29 @@ class FinancialDataFetcher:
 
     @staticmethod
     def _detect_korean_exchange(code: str) -> str:
-        """실제 history 데이터가 낙는 거래소를 반환 (KS 우선, 없으면 KQ 시도)."""
-        for suffix in (".KS", ".KQ"):
-            try:
-                hist = yf.Ticker(f"{code}{suffix}").history(period="5d")
-                if hist is not None and not hist.empty:
-                    return f"{code}{suffix}"
-            except Exception:
-                pass
-            time.sleep(0.3)
-        return f"{code}.KS"  # 감지 실패 시 KOSPI 폴백
+        """거래소를 정확히 판별한다.
+
+        yfinance info.exchange 기준:
+          - 'KSC'  → 한국거래소(KOSPI)  → .KS 반환
+          - 'KOE'  → 코스닥             → .KQ 반환
+        .KS 조회 시 exchange=KSC 이면 KOSPI 확정.
+        그 외(KOE/N/A 등)는 KOSDAQ로 간주해 .KQ 반환.
+        """
+        try:
+            ks_info = yf.Ticker(f"{code}.KS").info
+            if ks_info.get("exchange") == "KSC":
+                return f"{code}.KS"
+        except Exception:
+            pass
+        time.sleep(0.3)
+        # KOSPI 아님 → KOSDAQ(.KQ) 시도
+        try:
+            hist = yf.Ticker(f"{code}.KQ").history(period="5d")
+            if hist is not None and not hist.empty:
+                return f"{code}.KQ"
+        except Exception:
+            pass
+        return f"{code}.KS"  # 감지 실패 시 폴백
 
     # ------------------------------------------------------------------
     # Info cache

@@ -845,9 +845,11 @@ def _collect_ticker_data(
     if not force_refresh:
         try:
             raw_norm = ticker_input.strip().upper().replace(" ", "")
-            # 6자리 한국 코드는 KS / KQ 둘 다 확인
+            # 6자리 한국 코드: 감지된 거래소 캐시를 우선 조회, 반대쪽도 폴백으로 확인
             if "." not in raw_norm and raw_norm.isdigit() and len(raw_norm) == 6:
-                cache_candidates = [f"{raw_norm}.KS", f"{raw_norm}.KQ"]
+                detected = FinancialDataFetcher._detect_korean_exchange(raw_norm)
+                other = f"{raw_norm}.KQ" if detected.endswith(".KS") else f"{raw_norm}.KS"
+                cache_candidates = [detected, other]
             else:
                 cache_candidates = [FinancialDataFetcher._resolve_ticker(ticker_input)]
 
@@ -858,7 +860,7 @@ def _collect_ticker_data(
                         d = dict(cached["data"])
                         # 현재가는 캐시와 무관하게 항상 실시간 조회
                         try:
-                            live_fetcher = FinancialDataFetcher(ticker_input)
+                            live_fetcher = FinancialDataFetcher(candidate)
                             live_price = live_fetcher.get_live_price()
                             if live_price:
                                 d["metrics"] = {**d["metrics"], "current_price": live_price}
@@ -1283,17 +1285,26 @@ def run_analysis(cfg: dict) -> None:
     force_refresh = cfg.get("force_refresh", False)
     if ticker_input and not force_refresh:
         raw_norm = ticker_input.strip().upper().replace(" ", "")
-        cache_candidates = (
-            [f"{raw_norm}.KS", f"{raw_norm}.KQ"]
-            if "." not in raw_norm and raw_norm.isdigit() and len(raw_norm) == 6
-            else [FinancialDataFetcher._resolve_ticker(ticker_input)]
-        )
+        if "." not in raw_norm and raw_norm.isdigit() and len(raw_norm) == 6:
+            detected = FinancialDataFetcher._detect_korean_exchange(raw_norm)
+            other = f"{raw_norm}.KQ" if detected.endswith(".KS") else f"{raw_norm}.KS"
+            cache_candidates = [detected, other]
+        else:
+            cache_candidates = [FinancialDataFetcher._resolve_ticker(ticker_input)]
         for candidate in cache_candidates:
             if cache_manager.is_valid(candidate):
                 cached = cache_manager.load(candidate)
                 if cached:
+                    render_data = dict(cached["data"])
+                    # 현재가는 항상 실시간 조회
+                    try:
+                        live_price = FinancialDataFetcher(candidate).get_live_price()
+                        if live_price:
+                            render_data["metrics"] = {**render_data["metrics"], "current_price": live_price}
+                    except Exception:
+                        pass
                     _render_results(
-                        data=cached["data"],
+                        data=render_data,
                         api_key=api_key,
                         monthly_amount=monthly_amount,
                         dca_years=dca_years,
