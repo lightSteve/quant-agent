@@ -201,6 +201,10 @@ class FinancialDataFetcher:
             "fifty_two_week_high": i.get("fiftyTwoWeekHigh"),
             "fifty_two_week_low": i.get("fiftyTwoWeekLow"),
             "current_price": current_price,
+            # 적정주가 산출용 추가 지표
+            "book_value_per_share": i.get("bookValue"),          # BPS (주당순자산)
+            "shares_outstanding": i.get("sharesOutstanding"),    # 발행 주식수
+            "eps": i.get("trailingEps"),                          # 주당순이익 (EPS)
         }
 
     # ------------------------------------------------------------------

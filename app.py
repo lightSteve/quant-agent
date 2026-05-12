@@ -108,6 +108,313 @@ def _safe_divide(a: float, b: float) -> float | None:
     return a / b if b and b != 0 else None
 
 
+# ──────────────────────────────────────────────
+# Fair Value Calculation
+# ──────────────────────────────────────────────
+
+def _calculate_fair_value(
+    bps: float | None,
+    roe: float | None,
+    eps: float | None,
+    peer_per: float | None,
+    current_price: float | None,
+    required_return: float = 0.08,
+) -> dict:
+    """
+    3가지 방법으로 적정주가를 산출한다.
+
+    1. PBR-ROE법: 적정주가 = BPS × (ROE / 요구수익률)
+    2. 그레이엄 공식: √(22.5 × EPS × BPS)
+    3. EPS × 업종 평균 PER법: EPS × peer_per
+    """
+    import math
+    results: dict = {}
+
+    # ── Method 1: PBR-ROE (적정 PBR 기반) ──
+    if bps and bps > 0 and roe and roe > 0:
+        fair_pbr = roe / required_return
+        fair_price = bps * fair_pbr
+        mos = (fair_price - current_price) / current_price * 100 if current_price and current_price > 0 else None
+        results["pbr_roe"] = {
+            "method": "PBR-ROE법",
+            "fair_price": fair_price,
+            "fair_pbr": fair_pbr,
+            "formula": f"BPS {bps:,.0f}원 × 적정 PBR {fair_pbr:.2f}배",
+            "description": f"ROE({roe*100:.1f}%) ÷ 요구수익률({required_return*100:.0f}%) = 적정 PBR {fair_pbr:.2f}배",
+            "margin_of_safety": mos,
+        }
+
+    # ── Method 2: Graham Number ──
+    if bps and bps > 0 and eps and eps > 0:
+        graham = math.sqrt(22.5 * abs(eps) * abs(bps))
+        mos = (graham - current_price) / current_price * 100 if current_price and current_price > 0 else None
+        results["graham"] = {
+            "method": "그레이엄 공식",
+            "fair_price": graham,
+            "formula": f"√(22.5 × EPS {eps:,.0f}원 × BPS {bps:,.0f}원)",
+            "description": "벤저민 그레이엄의 보수적 안전마진 공식 (PER 15 × PBR 1.5 기준)",
+            "margin_of_safety": mos,
+        }
+
+    # ── Method 3: EPS × Peer PER ──
+    if eps and eps > 0 and peer_per and peer_per > 0:
+        fair_price = eps * peer_per
+        mos = (fair_price - current_price) / current_price * 100 if current_price and current_price > 0 else None
+        results["eps_per"] = {
+            "method": "EPS × 업종 평균 PER법",
+            "fair_price": fair_price,
+            "formula": f"EPS {eps:,.0f}원 × 업종 평균 PER {peer_per:.1f}배",
+            "description": f"동종업계 중앙값 PER {peer_per:.1f}배를 EPS에 적용",
+            "margin_of_safety": mos,
+        }
+
+    return results
+
+
+def _render_fair_value_section(
+    metrics: dict,
+    peer_df: pd.DataFrame | None,
+    company_name: str,
+) -> None:
+    """적정주가 산출 섹션을 렌더링한다."""
+    st.markdown("---")
+    st.subheader("📐 적정주가 산출")
+    st.caption(
+        "ROE·BPS 기반 3가지 가치평가 모델로 적정주가를 추정합니다. "
+        "yfinance 데이터를 자동으로 활용하며, BPS를 직접 입력해 정밀도를 높일 수 있습니다."
+    )
+
+    current_price = metrics.get("current_price")
+    bps_auto      = metrics.get("book_value_per_share")
+    roe           = metrics.get("roe")
+    eps_auto      = metrics.get("eps")
+    shares        = metrics.get("shares_outstanding")
+    market_cap    = metrics.get("market_cap")
+
+    # ── 기초 데이터 표시 ──
+    with st.expander("📋 적정주가 산출 기초 데이터", expanded=True):
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("현재 주가", f"{current_price:,.0f}원" if current_price else "N/A",
+                      help="yfinance 실시간 종가 기준")
+        with c2:
+            st.metric("BPS (주당순자산)", f"{bps_auto:,.0f}원" if bps_auto else "N/A",
+                      help="Book Value Per Share — yfinance 제공")
+        with c3:
+            st.metric("EPS (주당순이익)", f"{eps_auto:,.0f}원" if eps_auto else "N/A",
+                      help="Trailing EPS (최근 12개월)")
+        with c4:
+            if shares:
+                shares_str = f"{shares/1e6:.0f}만주" if shares < 1e8 else f"{shares/1e8:.1f}억주"
+            else:
+                shares_str = "N/A"
+            st.metric("발행 주식수", shares_str, help="Shares Outstanding")
+
+        # 시가총액 검증 (BPS × 주식수 ↔ 시가총액)
+        if bps_auto and shares:
+            book_total = bps_auto * shares
+            if market_cap:
+                implied_pbr = market_cap / book_total
+                st.caption(
+                    f"📌 자본총계 추정: **{book_total/1e8:,.0f}억원** "
+                    f"| 시가총액 기준 내재 PBR: **{implied_pbr:.2f}배**"
+                )
+
+    # ── BPS 수동 입력 (고급) ──
+    with st.expander("✏️ BPS 직접 입력 (선택 — 재무제표 확인 후 정밀 입력)"):
+        st.caption(
+            "yfinance BPS가 부정확한 경우, 최신 재무제표의 "
+            "**자본총계 ÷ 발행주식수** 값을 입력하면 더 정확한 적정주가를 산출합니다."
+        )
+        col_bps, col_eps, col_r = st.columns(3)
+        with col_bps:
+            bps_manual = st.number_input(
+                "BPS 직접 입력 (원)",
+                min_value=0.0,
+                value=float(bps_auto) if bps_auto else 0.0,
+                step=100.0,
+                format="%.0f",
+                key=f"bps_input_{company_name}",
+                help="주당순자산 = 자본총계 ÷ 발행주식수",
+            )
+        with col_eps:
+            eps_manual = st.number_input(
+                "EPS 직접 입력 (원)",
+                min_value=0.0,
+                value=float(eps_auto) if eps_auto and eps_auto > 0 else 0.0,
+                step=10.0,
+                format="%.0f",
+                key=f"eps_input_{company_name}",
+                help="주당순이익 = 당기순이익 ÷ 발행주식수",
+            )
+        with col_r:
+            req_return_pct = st.number_input(
+                "요구수익률 (%)",
+                min_value=1.0,
+                max_value=30.0,
+                value=8.0,
+                step=0.5,
+                format="%.1f",
+                key=f"req_return_{company_name}",
+                help="PBR-ROE법에서 사용. 국내 장기 기대수익률 기준 8% 권장",
+            )
+
+        bps_used = bps_manual if bps_manual > 0 else bps_auto
+        eps_used = eps_manual if eps_manual > 0 else (eps_auto if eps_auto and eps_auto > 0 else None)
+        req_return = req_return_pct / 100
+
+    # 업종 평균 PER 계산
+    peer_per = None
+    if peer_df is not None and not peer_df.empty and "pe_ratio" in peer_df.columns:
+        valid_per = peer_df["pe_ratio"].dropna()
+        valid_per = valid_per[valid_per > 0]
+        if not valid_per.empty:
+            peer_per = float(valid_per.median())
+
+    # ── 적정주가 계산 ──
+    fair_values = _calculate_fair_value(
+        bps=bps_used,
+        roe=roe,
+        eps=eps_used,
+        peer_per=peer_per,
+        current_price=current_price,
+        required_return=req_return,
+    )
+
+    if not fair_values:
+        st.warning(
+            "⚠️ 적정주가 산출에 필요한 데이터(BPS, ROE, EPS)가 부족합니다. "
+            "위 입력란에 직접 BPS/EPS를 입력해보세요."
+        )
+        return
+
+    # ── 결과 카드 ──
+    method_icons = {"pbr_roe": "📊", "graham": "📖", "eps_per": "💡"}
+    method_colors = {"pbr_roe": "#1565c0", "graham": "#4a148c", "eps_per": "#1b5e20"}
+
+    st.markdown("#### 모델별 적정주가")
+    cols = st.columns(len(fair_values))
+    for col, (key, fv) in zip(cols, fair_values.items()):
+        fp = fv["fair_price"]
+        mos = fv.get("margin_of_safety")
+        icon = method_icons.get(key, "📐")
+        color = method_colors.get(key, "#333")
+        mos_str = ""
+        if mos is not None:
+            mos_color = "#2e7d32" if mos >= 0 else "#c62828"
+            arrow = "▲" if mos >= 0 else "▼"
+            mos_str = (
+                f"<span style='color:{mos_color}; font-weight:700'>"
+                f"{arrow} 현재가 대비 {abs(mos):.1f}%"
+                f"{'(저평가)' if mos > 0 else '(고평가)'}</span>"
+            )
+        with col:
+            st.markdown(
+                f"""
+                <div style="
+                    background:#f8f9fc;
+                    border-left: 4px solid {color};
+                    border-radius: 8px;
+                    padding: 1rem 1.2rem;
+                    margin-bottom: 0.6rem;
+                ">
+                  <div style="font-size:0.78rem; color:#555; margin-bottom:0.3rem">
+                    {icon} {fv['method']}
+                  </div>
+                  <div style="font-size:2rem; font-weight:800; color:{color}">
+                    {fp:,.0f}원
+                  </div>
+                  <div style="font-size:0.82rem; margin-top:0.3rem">{mos_str}</div>
+                  <div style="font-size:0.75rem; color:#777; margin-top:0.5rem">
+                    {fv['formula']}
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.caption(fv["description"])
+
+    # ── 적정주가 범위 시각화 ──
+    fair_prices = [fv["fair_price"] for fv in fair_values.values()]
+    method_names = [fv["method"] for fv in fair_values.values()]
+
+    fig_fv = go.Figure()
+
+    # 적정주가 막대
+    bar_colors_fv = [method_colors.get(k, "#1e4d7b") for k in fair_values]
+    fig_fv.add_trace(go.Bar(
+        x=method_names,
+        y=fair_prices,
+        marker_color=bar_colors_fv,
+        text=[f"{p:,.0f}원" for p in fair_prices],
+        textposition="outside",
+        name="적정주가",
+    ))
+
+    # 현재가 기준선
+    if current_price and current_price > 0:
+        fig_fv.add_hline(
+            y=current_price,
+            line_dash="dash",
+            line_color="#e53935",
+            line_width=2,
+            annotation_text=f"현재가 {current_price:,.0f}원",
+            annotation_position="right",
+        )
+
+    # 평균 적정주가
+    avg_fair = sum(fair_prices) / len(fair_prices)
+    fig_fv.add_hline(
+        y=avg_fair,
+        line_dash="dot",
+        line_color="#ff8f00",
+        annotation_text=f"평균 적정주가 {avg_fair:,.0f}원",
+        annotation_position="left",
+    )
+
+    fig_fv.update_layout(
+        title="모델별 적정주가 비교",
+        yaxis_title="주가 (원)",
+        height=340,
+        showlegend=False,
+        yaxis=dict(rangemode="tozero"),
+    )
+    st.plotly_chart(fig_fv, use_container_width=True, key=f"chart_fair_value_{company_name}")
+
+    # ── 종합 판단 요약 ──
+    if current_price and current_price > 0:
+        all_mos = [fv["margin_of_safety"] for fv in fair_values.values() if fv.get("margin_of_safety") is not None]
+        if all_mos:
+            avg_mos = sum(all_mos) / len(all_mos)
+            if avg_mos >= 30:
+                verdict = "🟢 **강한 저평가** — 평균 모델 대비 현재가가 크게 낮습니다."
+            elif avg_mos >= 10:
+                verdict = "🟡 **저평가 구간** — 안전마진이 존재합니다."
+            elif avg_mos >= -10:
+                verdict = "⚪ **적정가치 근처** — 과도한 고평가나 저평가 신호는 없습니다."
+            elif avg_mos >= -30:
+                verdict = "🟠 **약간 고평가** — 현재가가 추정 적정주가보다 높습니다."
+            else:
+                verdict = "🔴 **고평가 주의** — 현재가가 추정 적정주가를 크게 상회합니다."
+
+            st.markdown(
+                f"""
+                <div class="card">
+                  <b>📊 적정주가 종합</b><br>
+                  모델 평균 적정주가: <b>{avg_fair:,.0f}원</b> | 현재가: <b>{current_price:,.0f}원</b>
+                  | 평균 안전마진: <b style="color:{'#2e7d32' if avg_mos >= 0 else '#c62828'}">{avg_mos:+.1f}%</b><br>
+                  {verdict}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.caption(
+        "⚠️ 적정주가는 투자 참고 지표이며, 실제 주가는 시장 심리·거시경제·업황 등 다양한 요인에 의해 결정됩니다. "
+        "단일 모델보다 복수 모델의 범위를 종합적으로 판단하세요."
+    )
+
+
 def _sanitize_json(obj):
     """Recursively convert Timestamp keys/values to str for json.dumps compatibility."""
     if isinstance(obj, dict):
@@ -624,6 +931,9 @@ def render_tab_undervaluation(
             f'<div class="card">{undervaluation.get("summary", "")}</div>',
             unsafe_allow_html=True,
         )
+
+    # ── 적정주가 산출 섹션 ──
+    _render_fair_value_section(metrics, peer_df, company_name)
 
 
 # ──────────────────────────────────────────────
