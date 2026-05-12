@@ -34,7 +34,12 @@ class FinancialDataFetcher:
     """Fetch and compute financial metrics for a given ticker."""
 
     def __init__(self, raw_ticker: str) -> None:
-        self.ticker = self._resolve_ticker(raw_ticker)
+        raw_norm = raw_ticker.strip().upper().replace(" ", "")
+        # 6자리 한국 코드는 코스피/코스닥 자동 감지
+        if "." not in raw_norm and raw_norm.isdigit() and len(raw_norm) == 6:
+            self.ticker = self._detect_korean_exchange(raw_norm)
+        else:
+            self.ticker = self._resolve_ticker(raw_ticker)
         self._yf = yf.Ticker(self.ticker)
         self._info: Optional[Dict[str, Any]] = None
 
@@ -49,10 +54,23 @@ class FinancialDataFetcher:
             return raw
         if raw.isdigit():
             if len(raw) == 6:
-                return f"{raw}.KS"   # KOSPI
+                return f"{raw}.KS"   # KOSPI default
             if len(raw) == 4:
                 return f"{raw}.T"    # Tokyo
         return raw
+
+    @staticmethod
+    def _detect_korean_exchange(code: str) -> str:
+        """실제 history 데이터가 낙는 거래소를 반환 (KS 우선, 없으면 KQ 시도)."""
+        for suffix in (".KS", ".KQ"):
+            try:
+                hist = yf.Ticker(f"{code}{suffix}").history(period="5d")
+                if hist is not None and not hist.empty:
+                    return f"{code}{suffix}"
+            except Exception:
+                pass
+            time.sleep(0.3)
+        return f"{code}.KS"  # 감지 실패 시 KOSPI 폴백
 
     # ------------------------------------------------------------------
     # Info cache
@@ -128,11 +146,27 @@ class FinancialDataFetcher:
             return pd.DataFrame()
 
     # ------------------------------------------------------------------
+    # Live price (history 기반 — KR 종목 info 불안정 대응)
+    # ------------------------------------------------------------------
+
+    def get_live_price(self) -> Optional[float]:
+        """yfinance history 기반 현재가. info보다 신뢰도 높음."""
+        try:
+            hist = self._yf.history(period="2d")
+            if hist is not None and not hist.empty:
+                return float(hist["Close"].iloc[-1])
+        except Exception:
+            pass
+        return None
+
+    # ------------------------------------------------------------------
     # Key valuation / financial metrics
     # ------------------------------------------------------------------
 
     def get_key_metrics(self) -> Dict[str, Any]:
         i = self.info
+        # history 기반 현재가 우선 — KR 종목에서 info 가격이 지연되는 문제 방지
+        current_price = self.get_live_price() or i.get("currentPrice") or i.get("regularMarketPrice")
         return {
             "pe_ratio": i.get("trailingPE"),
             "forward_pe": i.get("forwardPE"),
@@ -153,7 +187,7 @@ class FinancialDataFetcher:
             "beta": i.get("beta"),
             "fifty_two_week_high": i.get("fiftyTwoWeekHigh"),
             "fifty_two_week_low": i.get("fiftyTwoWeekLow"),
-            "current_price": i.get("currentPrice") or i.get("regularMarketPrice"),
+            "current_price": current_price,
         }
 
     # ------------------------------------------------------------------

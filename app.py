@@ -17,7 +17,7 @@ from PIL import Image
 
 from agents.analyst_agent import AnalystAgent
 from agents.quant_scorer import QuantScorer
-from agents.sector_analyzer import get_analyzer
+from agents.sector_analyzer import get_analyzer, get_kosdaq_analyzer
 from data.fetcher import FinancialDataFetcher
 from data.sector_db import get_all_results, get_queue_stats, get_sectors, init_db
 from utils.formatters import fmt_number, fmt_pct, fmt_ratio, fmt_usd, score_color
@@ -210,7 +210,7 @@ def build_sidebar() -> dict:
         # ── 페이지 모드 선택 ───────────────────
         page = st.radio(
             "📌 모드",
-            ["📊 개별 종목 분석", "🔭 섹터 전수 분석"],
+            ["📊 개별 종목 분석", "🔭 코스피 전수 분석", "🔭 코스닥 전수 분석"],
             horizontal=True,
         )
         st.markdown("---")
@@ -234,8 +234,8 @@ def build_sidebar() -> dict:
         if mode == "종목 코드 입력":
             ticker_input = st.text_input(
                 "종목 코드",
-                placeholder="예: 005930  AAPL  TSLA  (공백/쉼표로 최대 5개)",
-                help="단일 종목: 상세 분석 | 여러 종목(공백·쉼표 구분): 비교 분석 후 AI 추천\n한국 6자리 코드 자동인식 | 미국 영문 티커",
+                placeholder="예: 005930  389500  AAPL  TSLA  (공백/쉼표로 최대 5개)",
+                help="단일 종목: 상세 분석 | 여러 종목(공백·쉼표 구분): 비교 분석 후 AI 추천\n한국 6자리 코드 → 코스피/코스닥 자동 감지 | 미국 영문 티커",
             )
         else:
             uploaded_image = st.file_uploader(
@@ -320,9 +320,11 @@ def show_welcome() -> None:
         """
         ---
         **지원 종목**
-        - 🇰🇷 한국: `005930` (삼성전자)  `000660` (SK하이닉스)  `005380` (현대차)
+        - 🇰🇷 코스피: `005930` (삼성전자)  `000660` (SK하이닉스)  `005380` (현대차)
+        - 🇰🇷 코스닥: `389500` (에스비비테크)  `247540` (에코프로비엠)  `263750` (펄어비스)
         - 🇺🇸 미국: `AAPL`  `TSLA`  `NVDA`  `MSFT`
         - 🌏 기타: `0700.HK` (텐센트)  `7203.T` (도요타)
+        > 💡 한국 6자리 코드 입력 시 **코스피/코스닥 자동 감지**됩니다.
 
         > ⚠️ 투자 결과에 대한 책임은 투자자 본인에게 있습니다. 본 시스템은 참고 자료입니다.
         """,
@@ -842,17 +844,32 @@ def _collect_ticker_data(
     # ── 캐시 확인 ─────────────────────────────
     if not force_refresh:
         try:
-            resolved = FinancialDataFetcher._resolve_ticker(ticker_input)
-            if cache_manager.is_valid(resolved):
-                cached = cache_manager.load(resolved)
-                if cached:
-                    d = dict(cached["data"])
-                    d["_cache_meta"] = {
-                        "cached_at":    cached["cached_at"],
-                        "quarter":      cached["quarter"],
-                        "next_refresh": cached["next_refresh"],
-                    }
-                    return d
+            raw_norm = ticker_input.strip().upper().replace(" ", "")
+            # 6자리 한국 코드는 KS / KQ 둘 다 확인
+            if "." not in raw_norm and raw_norm.isdigit() and len(raw_norm) == 6:
+                cache_candidates = [f"{raw_norm}.KS", f"{raw_norm}.KQ"]
+            else:
+                cache_candidates = [FinancialDataFetcher._resolve_ticker(ticker_input)]
+
+            for candidate in cache_candidates:
+                if cache_manager.is_valid(candidate):
+                    cached = cache_manager.load(candidate)
+                    if cached:
+                        d = dict(cached["data"])
+                        # 현재가는 캐시와 무관하게 항상 실시간 조회
+                        try:
+                            live_fetcher = FinancialDataFetcher(ticker_input)
+                            live_price = live_fetcher.get_live_price()
+                            if live_price:
+                                d["metrics"] = {**d["metrics"], "current_price": live_price}
+                        except Exception:
+                            pass
+                        d["_cache_meta"] = {
+                            "cached_at":    cached["cached_at"],
+                            "quarter":      cached["quarter"],
+                            "next_refresh": cached["next_refresh"],
+                        }
+                        return d
         except Exception:
             pass
 
@@ -1265,22 +1282,28 @@ def run_analysis(cfg: dict) -> None:
     # ── 캐시 확인 ─────────────────────────────
     force_refresh = cfg.get("force_refresh", False)
     if ticker_input and not force_refresh:
-        resolved = FinancialDataFetcher._resolve_ticker(ticker_input)
-        if cache_manager.is_valid(resolved):
-            cached = cache_manager.load(resolved)
-            if cached:
-                _render_results(
-                    data=cached["data"],
-                    api_key=api_key,
-                    monthly_amount=monthly_amount,
-                    dca_years=dca_years,
-                    cache_info={
-                        "cached_at":    cached["cached_at"],
-                        "quarter":      cached["quarter"],
-                        "next_refresh": cached["next_refresh"],
-                    },
-                )
-                return
+        raw_norm = ticker_input.strip().upper().replace(" ", "")
+        cache_candidates = (
+            [f"{raw_norm}.KS", f"{raw_norm}.KQ"]
+            if "." not in raw_norm and raw_norm.isdigit() and len(raw_norm) == 6
+            else [FinancialDataFetcher._resolve_ticker(ticker_input)]
+        )
+        for candidate in cache_candidates:
+            if cache_manager.is_valid(candidate):
+                cached = cache_manager.load(candidate)
+                if cached:
+                    _render_results(
+                        data=cached["data"],
+                        api_key=api_key,
+                        monthly_amount=monthly_amount,
+                        dca_years=dca_years,
+                        cache_info={
+                            "cached_at":    cached["cached_at"],
+                            "quarter":      cached["quarter"],
+                            "next_refresh": cached["next_refresh"],
+                        },
+                    )
+                    return
 
     status = st.empty()
     progress = st.progress(0)
@@ -1583,18 +1606,23 @@ def _render_sector_detail(r: dict, cfg: dict, api_key: str) -> None:
 
 
 # ──────────────────────────────────────────────
-# 섹터 전수 분석 탭
+# 섹터 전수 분석 탭 (KOSPI / KOSDAQ 공용)
 # ──────────────────────────────────────────────
 
-def render_sector_tab(cfg: dict) -> None:  # noqa: C901
-    """KOSPI 전 종목 백그라운드 AI 분석 결과 UI."""
+def render_sector_tab(cfg: dict, market: str = "KOSPI") -> None:  # noqa: C901
+    """KOSPI / KOSDAQ 전 종목 백그라운드 AI 분석 결과 UI."""
+    is_kosdaq = market == "KOSDAQ"
     api_key = cfg.get("api_key", "")
     init_db()
-    analyzer = get_analyzer()
+    analyzer = get_kosdaq_analyzer() if is_kosdaq else get_analyzer()
 
-    st.markdown("## 🔭 KOSPI 섹터별 전수 분석")
+    market_label = "코스닥" if is_kosdaq else "코스피"
+    market_emoji = "🔭" if is_kosdaq else "🔭"
+    key_pfx = "kq_" if is_kosdaq else "ks_"  # 세션스테이트 키 충돌 방지
+
+    st.markdown(f"## 🔭 {market_label} 섹터별 전수 분석")
     st.caption(
-        "KOSPI 전 종목을 백그라운드에서 순차 AI 분석합니다. "
+        f"{market_label} 전 종목을 백그라운드에서 순차 AI 분석합니다. "
         "분석 중에도 완료된 결과를 실시간으로 확인할 수 있습니다."
     )
 
@@ -1603,7 +1631,7 @@ def render_sector_tab(cfg: dict) -> None:  # noqa: C901
 
     with col_start:
         if not analyzer.is_running():
-            if st.button("▶ 분석 시작", type="primary", use_container_width=True):
+            if st.button("▶ 분석 시작", type="primary", use_container_width=True, key=f"{key_pfx}start"):
                 if not api_key:
                     st.error("사이드바에서 GitHub PAT를 먼저 입력하세요.")
                 else:
@@ -1615,46 +1643,48 @@ def render_sector_tab(cfg: dict) -> None:  # noqa: C901
                         st.warning("이미 실행 중입니다.")
                     st.rerun()
         else:
-            if st.button("⏹ 분석 중지", use_container_width=True):
+            if st.button("⏹ 분석 중지", use_container_width=True, key=f"{key_pfx}stop"):
                 analyzer.stop()
                 st.rerun()
 
     with col_reload:
         if st.button("🔃 종목 재적재", use_container_width=True,
-                     help="KOSPI 종목 목록을 다시 불러와 새 종목만 추가합니다"):
+                     help=f"{market_label} 종목 목록을 다시 불러와 새 종목만 추가합니다",
+                     key=f"{key_pfx}reload"):
             n = analyzer.load_queue()
             st.toast(f"신규 {n}개 추가됨")
             st.rerun()
 
     with col_reset:
         if st.button("🗑 전체 초기화", use_container_width=True,
-                     help="큐와 분석 결과를 모두 삭제합니다 (주의)"):
-            st.session_state["confirm_reset_pending"] = True
-        if st.session_state.get("confirm_reset_pending"):
+                     help="큐와 분석 결과를 모두 삭제합니다 (주의)",
+                     key=f"{key_pfx}reset_btn"):
+            st.session_state[f"{key_pfx}confirm_reset"] = True
+        if st.session_state.get(f"{key_pfx}confirm_reset"):
             st.warning("⚠️ **정말 삭제하시겠습니까?** 모든 분석 결과와 큐가 영구 삭제됩니다.")
             rc1, rc2 = st.columns(2)
             with rc1:
-                if st.button("✅ 예, 삭제합니다", use_container_width=True, type="primary", key="confirm_reset_yes"):
+                if st.button("✅ 예, 삭제합니다", use_container_width=True, type="primary", key=f"{key_pfx}confirm_yes"):
                     from data.sector_db import reset_all
                     reset_all()
                     if analyzer.is_running():
                         analyzer.stop()
-                    st.session_state.pop("confirm_reset_pending", None)
+                    st.session_state.pop(f"{key_pfx}confirm_reset", None)
                     st.toast("초기화 완료")
                     st.rerun()
             with rc2:
-                if st.button("❌ 취소", use_container_width=True, key="confirm_reset_no"):
-                    st.session_state.pop("confirm_reset_pending", None)
+                if st.button("❌ 취소", use_container_width=True, key=f"{key_pfx}confirm_no"):
+                    st.session_state.pop(f"{key_pfx}confirm_reset", None)
                     st.rerun()
 
     with col_refresh:
         if st.button("🔄 새로고침", use_container_width=True,
-                     help="최신 분석 결과를 다시 불러옵니다"):
+                     help="최신 분석 결과를 다시 불러옵니다", key=f"{key_pfx}refresh"):
             st.rerun()
 
     # ── 2. 진행 현황 ──────────────────────────
     st.markdown("---")
-    stats = get_queue_stats()
+    stats = get_queue_stats(market_filter=market)
     total = max(stats["total"], 1)
     analyzed = stats["analyzed"]
 
@@ -1707,26 +1737,27 @@ def render_sector_tab(cfg: dict) -> None:  # noqa: C901
 
     if analyzed == 0:
         st.markdown("---")
-        st.info("▲ **분석 시작** 버튼을 눌러 KOSPI 종목 분석을 시작하세요.")
+        st.info(f"▲ **분석 시작** 버튼을 눌러 {market_label} 종목 분석을 시작하세요.")
         return
 
     # ── 3. 필터 & 결과 테이블 ─────────────────
     st.markdown("---")
     st.subheader("📊 분석 결과")
 
-    sectors = ["전체"] + get_sectors()
+    sectors = ["전체"] + get_sectors(market_filter=market)
     f1, f2, f3 = st.columns([2, 2, 1])
     with f1:
-        selected_sector = st.selectbox("섹터 필터", sectors, key="sector_filter")
+        selected_sector = st.selectbox("섹터 필터", sectors, key=f"{key_pfx}sector_filter")
     with f2:
         signal_filter = st.selectbox(
-            "매수 신호", ["전체", "✅ 매수 신호만", "⚪ 비신호만"], key="signal_filter"
+            "매수 신호", ["전체", "✅ 매수 신호만", "⚪ 비신호만"], key=f"{key_pfx}signal_filter"
         )
     with f3:
-        show_top = st.number_input("최대 표시", 10, 300, 100, 10, key="show_top")
+        show_top = st.number_input("최대 표시", 10, 300, 100, 10, key=f"{key_pfx}show_top")
 
     results = get_all_results(
-        sector_filter=selected_sector if selected_sector != "전체" else None
+        sector_filter=selected_sector if selected_sector != "전체" else None,
+        market_filter=market,
     )
     if signal_filter == "✅ 매수 신호만":
         results = [r for r in results if r.get("buy_signal")]
@@ -1742,7 +1773,7 @@ def render_sector_tab(cfg: dict) -> None:  # noqa: C901
     lookup_input = st.text_input(
         "🔎 종목 검색",
         placeholder="종목명 또는 코드 입력 (예: 삼성전자, 005930.KS) — 테이블 행 클릭으로도 선택 가능",
-        key="sector_lookup_input",
+        key=f"{key_pfx}lookup_input",
     )
 
     # 검색어로 결과 필터링 (테이블 표시용)
@@ -1813,7 +1844,7 @@ def render_sector_tab(cfg: dict) -> None:  # noqa: C901
         on_select="rerun",
         selection_mode="single-row",
         column_config=col_cfg,
-        key="sector_results_table",
+        key=f"{key_pfx}results_table",
     )
 
     # ── 4. 선택 종목 분석 조회 ────────────────
@@ -1827,16 +1858,16 @@ def render_sector_tab(cfg: dict) -> None:  # noqa: C901
         sel_idx = table_event.selection.rows[0]
         if sel_idx < len(filtered_results):
             selected_result = filtered_results[sel_idx]
-            st.session_state["sector_selected_ticker"] = selected_result["ticker"]
+            st.session_state[f"{key_pfx}selected_ticker"] = selected_result["ticker"]
 
     if selected_result is None and lookup_input and len(filtered_results) == 1:
         selected_result = filtered_results[0]
-        st.session_state["sector_selected_ticker"] = selected_result["ticker"]
+        st.session_state[f"{key_pfx}selected_ticker"] = selected_result["ticker"]
 
     # 드롭다운: 현재 선택 종목 기준으로 기본값 설정
     options = [f"{r['company_name']}  ({r['ticker']})" for r in results]
     current_idx = 0
-    prev_ticker = st.session_state.get("sector_selected_ticker")
+    prev_ticker = st.session_state.get(f"{key_pfx}selected_ticker")
     if selected_result:
         prev_ticker = selected_result["ticker"]
     if prev_ticker:
@@ -1849,12 +1880,12 @@ def render_sector_tab(cfg: dict) -> None:  # noqa: C901
         "또는 드롭다운에서 종목 선택",
         options,
         index=current_idx,
-        key="sector_detail_select",
+        key=f"{key_pfx}detail_select",
     )
     if selected_str:
         idx = options.index(selected_str)
         selected_result = results[idx]
-        st.session_state["sector_selected_ticker"] = selected_result["ticker"]
+        st.session_state[f"{key_pfx}selected_ticker"] = selected_result["ticker"]
 
     if selected_result:
         _render_sector_detail(selected_result, cfg, api_key)
@@ -1869,8 +1900,12 @@ def render_sector_tab(cfg: dict) -> None:  # noqa: C901
 def main() -> None:
     cfg = build_sidebar()
 
-    if cfg["page"] == "🔭 섹터 전수 분석":
-        render_sector_tab(cfg)
+    if cfg["page"] == "🔭 코스피 전수 분석":
+        render_sector_tab(cfg, market="KOSPI")
+        return
+
+    if cfg["page"] == "🔭 코스닥 전수 분석":
+        render_sector_tab(cfg, market="KOSDAQ")
         return
 
     if cfg["analyze"]:

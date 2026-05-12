@@ -319,40 +319,33 @@ def save_result(result: Dict[str, Any]) -> None:
             )
 
 
-def get_all_results(sector_filter: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_all_results(
+    sector_filter: Optional[str] = None,
+    market_filter: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """분석 완료 결과 조회. appeal_score 내림차순."""
     p = _ph()
     with _get_cursor() as cur:
+        conditions = []
+        params: list = []
         if sector_filter and sector_filter != "전체":
-            cur.execute(
-                f"""
-                SELECT * FROM sector_analysis
-                WHERE sector_kr = {p} OR sector = {p}
-                ORDER BY appeal_score DESC NULLS LAST
-                """,
-                (sector_filter, sector_filter),
-            )
-        else:
-            cur.execute(
-                "SELECT * FROM sector_analysis ORDER BY appeal_score DESC NULLS LAST"
-            )
+            conditions.append(f"(sector_kr = {p} OR sector = {p})")
+            params += [sector_filter, sector_filter]
+        if market_filter:
+            conditions.append(f"market = {p}")
+            params.append(market_filter)
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        cur.execute(
+            f"SELECT * FROM sector_analysis {where} ORDER BY appeal_score DESC NULLS LAST",
+            params,
+        )
         rows = cur.fetchall()
         return [_row_to_dict(r) for r in rows]
 
 
-def get_queue_stats() -> Dict[str, int]:
+def get_queue_stats(market_filter: Optional[str] = None) -> Dict[str, int]:
     """큐 및 분석 현황 통계."""
-    with _get_cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM stock_queue")
-        total = cur.fetchone()
-        cur.execute("SELECT COUNT(*) FROM stock_queue WHERE status='done'")
-        done = cur.fetchone()
-        cur.execute("SELECT COUNT(*) FROM stock_queue WHERE status='pending'")
-        pending = cur.fetchone()
-        cur.execute("SELECT COUNT(*) FROM sector_analysis")
-        analyzed = cur.fetchone()
-        cur.execute("SELECT COUNT(*) FROM sector_analysis WHERE buy_signal=1")
-        buy_signals = cur.fetchone()
+    p = _ph()
 
     def _int(row) -> int:
         if row is None:
@@ -360,6 +353,43 @@ def get_queue_stats() -> Dict[str, int]:
         if isinstance(row, dict):
             return int(list(row.values())[0] or 0)
         return int(row[0] or 0)
+
+    with _get_cursor() as cur:
+        if market_filter:
+            cur.execute(
+                f"SELECT COUNT(*) FROM stock_queue WHERE market={p}", (market_filter,)
+            )
+            total = cur.fetchone()
+            cur.execute(
+                f"SELECT COUNT(*) FROM stock_queue WHERE market={p} AND status='done'",
+                (market_filter,),
+            )
+            done = cur.fetchone()
+            cur.execute(
+                f"SELECT COUNT(*) FROM stock_queue WHERE market={p} AND status='pending'",
+                (market_filter,),
+            )
+            pending = cur.fetchone()
+            cur.execute(
+                f"SELECT COUNT(*) FROM sector_analysis WHERE market={p}", (market_filter,)
+            )
+            analyzed = cur.fetchone()
+            cur.execute(
+                f"SELECT COUNT(*) FROM sector_analysis WHERE market={p} AND buy_signal=1",
+                (market_filter,),
+            )
+            buy_signals = cur.fetchone()
+        else:
+            cur.execute("SELECT COUNT(*) FROM stock_queue")
+            total = cur.fetchone()
+            cur.execute("SELECT COUNT(*) FROM stock_queue WHERE status='done'")
+            done = cur.fetchone()
+            cur.execute("SELECT COUNT(*) FROM stock_queue WHERE status='pending'")
+            pending = cur.fetchone()
+            cur.execute("SELECT COUNT(*) FROM sector_analysis")
+            analyzed = cur.fetchone()
+            cur.execute("SELECT COUNT(*) FROM sector_analysis WHERE buy_signal=1")
+            buy_signals = cur.fetchone()
 
     return {
         "total":       _int(total),
@@ -370,16 +400,28 @@ def get_queue_stats() -> Dict[str, int]:
     }
 
 
-def get_sectors() -> List[str]:
+def get_sectors(market_filter: Optional[str] = None) -> List[str]:
     """분석 결과에서 섹터 목록 추출."""
+    p = _ph()
     with _get_cursor() as cur:
-        cur.execute(
-            "SELECT DISTINCT COALESCE(NULLIF(sector_kr,''), sector) AS s "
-            "FROM sector_analysis "
-            "WHERE COALESCE(NULLIF(sector_kr,''), sector) IS NOT NULL "
-            "  AND COALESCE(NULLIF(sector_kr,''), sector) != '' "
-            "ORDER BY s"
-        )
+        if market_filter:
+            cur.execute(
+                "SELECT DISTINCT COALESCE(NULLIF(sector_kr,''), sector) AS s "
+                "FROM sector_analysis "
+                f"WHERE market = {p} "
+                "  AND COALESCE(NULLIF(sector_kr,''), sector) IS NOT NULL "
+                "  AND COALESCE(NULLIF(sector_kr,''), sector) != '' "
+                "ORDER BY s",
+                (market_filter,),
+            )
+        else:
+            cur.execute(
+                "SELECT DISTINCT COALESCE(NULLIF(sector_kr,''), sector) AS s "
+                "FROM sector_analysis "
+                "WHERE COALESCE(NULLIF(sector_kr,''), sector) IS NOT NULL "
+                "  AND COALESCE(NULLIF(sector_kr,''), sector) != '' "
+                "ORDER BY s"
+            )
         rows = cur.fetchall()
         return [_row_to_dict(r).get("s", "") for r in rows if r]
 

@@ -1,8 +1,8 @@
 """
-KOSPI 전 종목 섹터별 전수 분석 — 백그라운드 스레드 워커.
+KOSPI / KOSDAQ 전 종목 섹터별 전수 분석 — 백그라운드 스레드 워커.
 
 흐름:
-  1. FinanceDataReader로 KOSPI 종목 목록 수집 (없으면 대표 20종목 fallback)
+  1. FinanceDataReader로 KOSPI / KOSDAQ 종목 목록 수집 (없으면 대표 종목 fallback)
   2. SQLite 큐에 적재 (우선순위: 낮은 PBR = 높은 우선순위 → 저평가 후보 먼저)
   3. 백그라운드 스레드가 15초 간격으로 1종목씩 yfinance + AI 분석
   4. 결과는 성공/실패 무관하게 항상 SQLite 저장 → UI가 언제든 조회 가능
@@ -106,7 +106,91 @@ def _fetch_kospi_stocks() -> List[Dict[str, Any]]:
         return _fallback_stocks()
 
 
-def _fallback_stocks() -> List[Dict[str, Any]]:
+def _fetch_kosdaq_stocks() -> List[Dict[str, Any]]:
+    """FinanceDataReader로 KOSDAQ 전 종목 반환. 실패 시 대표 20종목 fallback."""
+    try:
+        import FinanceDataReader as fdr
+
+        df = fdr.StockListing("KOSDAQ")
+        if df is None or df.empty:
+            logger.warning("FDR KOSDAQ 빈 결과 → fallback 사용")
+            return _fallback_kosdaq_stocks()
+
+        stocks: List[Dict[str, Any]] = []
+        for _, row in df.iterrows():
+            symbol = str(row.get("Symbol") or row.get("Code") or "").strip()
+            if not symbol or not symbol.isdigit():
+                continue
+            # KOSDAQ 종목은 .KQ 또는 .KS — _detect_korean_exchange 와 동일 로직 사용
+            # FDR listing은 KOSDAQ 소속이 확실하므로 .KQ 우선 시도
+            ticker = f"{symbol}.KQ"
+            name = str(row.get("Name") or row.get("ISU_ABBRV") or symbol)
+            sector = str(row.get("Sector") or row.get("Industry") or "")
+            try:
+                mc = float(row.get("MarketCap", 0) or 0)
+                priority = 1.0 / mc if mc > 0 else 999.0
+            except Exception:
+                priority = 999.0
+            stocks.append(
+                {
+                    "ticker": ticker,
+                    "company_name": name,
+                    "sector": sector,
+                    "market": "KOSDAQ",
+                    "priority": priority,
+                }
+            )
+
+        if len(stocks) == 0:
+            logger.warning("FDR에서 KOSDAQ 유효 종목 0개 → fallback 사용")
+            return _fallback_kosdaq_stocks()
+
+        logger.info("KOSDAQ 종목 %d개 로드 완료", len(stocks))
+        return stocks
+    except ImportError:
+        logger.warning("FinanceDataReader 미설치 → 대표 KOSDAQ 종목 사용")
+        return _fallback_kosdaq_stocks()
+    except Exception as exc:
+        logger.error("KOSDAQ 종목 로드 실패: %s", exc)
+        return _fallback_kosdaq_stocks()
+
+
+def _fallback_kosdaq_stocks() -> List[Dict[str, Any]]:
+    """FinanceDataReader 없을 때 대표 KOSDAQ 종목."""
+    rows = [
+        ("035720", "카카오",             "Communication Services"),
+        ("035420", "NAVER",              "Communication Services"),
+        ("247540", "에코프로비엠",        "Basic Materials"),
+        ("086520", "에코프로",            "Basic Materials"),
+        ("196170", "알테오젠",            "Healthcare"),
+        ("091990", "셀트리온헬스케어",    "Healthcare"),
+        ("263750", "펄어비스",            "Technology"),
+        ("293490", "카카오게임즈",        "Technology"),
+        ("122870", "와이지엔터테인먼트",  "Communication Services"),
+        ("041510", "에스엠",             "Communication Services"),
+        ("095660", "네오위즈",            "Technology"),
+        ("357780", "솔브레인",            "Semiconductors"),
+        ("036930", "주성엔지니어링",      "Semiconductors"),
+        ("058470", "리노공업",            "Semiconductors"),
+        ("112040", "위메이드",            "Technology"),
+        ("389500", "에스비비테크",        "Technology"),
+        ("950130", "엑세스바이오",        "Healthcare"),
+        ("214150", "클래시스",            "Healthcare"),
+        ("145020", "휴젤",               "Healthcare"),
+        ("048260", "오스템임플란트",      "Healthcare"),
+    ]
+    return [
+        {
+            "ticker": f"{code}.KQ",
+            "company_name": name,
+            "sector": sector,
+            "market": "KOSDAQ",
+            "priority": float(i),
+        }
+        for i, (code, name, sector) in enumerate(rows)
+    ]
+
+
     """FinanceDataReader 없을 때 대표 KOSPI 종목."""
     rows = [
         ("005930", "삼성전자",          "Technology"),
@@ -198,6 +282,7 @@ def _fetch_metrics(ticker: str) -> Dict[str, Any]:
 # 백그라운드 스레드는 모듈 레벨에 보관해야 유지된다.
 
 _analyzer: Optional["SectorAnalyzer"] = None
+_kosdaq_analyzer: Optional["SectorAnalyzer"] = None
 _singleton_lock = threading.Lock()
 
 
@@ -205,16 +290,25 @@ def get_analyzer() -> "SectorAnalyzer":
     global _analyzer
     with _singleton_lock:
         if _analyzer is None:
-            _analyzer = SectorAnalyzer()
+            _analyzer = SectorAnalyzer(market="KOSPI")
     return _analyzer
+
+
+def get_kosdaq_analyzer() -> "SectorAnalyzer":
+    global _kosdaq_analyzer
+    with _singleton_lock:
+        if _kosdaq_analyzer is None:
+            _kosdaq_analyzer = SectorAnalyzer(market="KOSDAQ")
+    return _kosdaq_analyzer
 
 
 # ── SectorAnalyzer ──────────────────────────
 
 class SectorAnalyzer:
-    """백그라운드에서 KOSPI 종목을 순차 AI 분석하는 워커."""
+    """백그라운드에서 KOSPI 또는 KOSDAQ 종목을 순차 AI 분석하는 워커."""
 
-    def __init__(self) -> None:
+    def __init__(self, market: str = "KOSPI") -> None:
+        self._market = market  # "KOSPI" or "KOSDAQ"
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._api_key = ""
@@ -253,9 +347,9 @@ class SectorAnalyzer:
         return self._thread is not None and self._thread.is_alive()
 
     def load_queue(self) -> int:
-        stocks = _fetch_kospi_stocks()
+        stocks = _fetch_kosdaq_stocks() if self._market == "KOSDAQ" else _fetch_kospi_stocks()
         n = add_stocks_to_queue(stocks)
-        self._log(f"큐 적재: 신규 {n}개 / 전체 {len(stocks)}개")
+        self._log(f"{self._market} 큐 적재: 신규 {n}개 / 전체 {len(stocks)}개")
         return n
 
     @property
