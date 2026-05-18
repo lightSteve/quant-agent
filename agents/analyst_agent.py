@@ -281,6 +281,66 @@ class AnalystAgent:
             }
 
     # ------------------------------------------------------------------
+    # Step 5.5 – Business overview + sector trend
+    # ------------------------------------------------------------------
+
+    def analyze_business_and_sector_trend(
+        self,
+        company_name: str,
+        ticker: str,
+        sector: str,
+        industry: str,
+    ) -> Dict[str, Any]:
+        """
+        회사의 사업 개요와 국내·해외 섹터 부각 여부를 분석한다.
+
+        Returns JSON:
+          business_summary   : 사업 핵심 요약 (2~3문장)
+          main_products      : 주요 제품·서비스 목록
+          revenue_model      : 매출 구조 설명 (1문장)
+          domestic_trend     : 국내 섹터 동향 ("부각" / "보통" / "소외")
+          domestic_reason    : 국내 부각 여부 근거 (2문장)
+          global_trend       : 글로벌 섹터 동향 ("부각" / "보통" / "소외")
+          global_reason      : 글로벌 부각 여부 근거 (2문장)
+          trend_catalysts    : 최근 주가·섹터를 움직이는 핵심 촉매 (최대 3개)
+          trend_score        : 0~10 (10이 가장 핫한 섹터)
+        """
+        today_str = "2026년 5월 19일"
+        prompt = (
+            f"오늘 날짜: {today_str}\n"
+            f"종목: {company_name} ({ticker})\n"
+            f"섹터: {sector}, 산업: {industry}\n\n"
+            "위 회사에 대해 아래 JSON 형식으로 정확하게 답해줘. "
+            "반드시 최신 시장 지식을 활용해서 현시점(2026년 5월) 기준으로 판단해.\n\n"
+            "{\n"
+            '  "business_summary": "이 회사가 영위하는 사업 핵심 설명 (2~3문장, 구체적 제품·서비스 포함)",\n'
+            '  "main_products": ["주요 제품/서비스 1", "주요 제품/서비스 2", "주요 제품/서비스 3"],\n'
+            '  "revenue_model": "매출 구조 한 문장 요약",\n'
+            '  "domestic_trend": "부각 또는 보통 또는 소외",\n'
+            '  "domestic_reason": "현재 국내(한국) 주식시장에서 이 섹터가 주목받고 있는지 이유 2문장. 정책·수급·실적 근거 포함",\n'
+            '  "global_trend": "부각 또는 보통 또는 소외",\n'
+            '  "global_reason": "현재 글로벌 시장에서 이 섹터의 트렌드 2문장. 미국·유럽·중국 동향 포함",\n'
+            '  "trend_catalysts": ["촉매 1", "촉매 2", "촉매 3"],\n'
+            '  "trend_score": 0~10 사이 숫자\n'
+            "}"
+        )
+        raw = self._chat(prompt, temperature=0.4, max_tokens=900, json_mode=True)
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {
+                "business_summary": raw[:300] if raw else "분석 실패",
+                "main_products": [],
+                "revenue_model": "",
+                "domestic_trend": "보통",
+                "domestic_reason": "",
+                "global_trend": "보통",
+                "global_reason": "",
+                "trend_catalysts": [],
+                "trend_score": 5,
+            }
+
+    # ------------------------------------------------------------------
     # Step 6 – Sector scan: quick buy-appeal per stock
     # ------------------------------------------------------------------
 

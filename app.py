@@ -786,8 +786,93 @@ def render_tab_ai_summary(
     plain_summary: str,
     metrics: dict,
     has_api_key: bool,
+    business_sector_info: dict | None = None,
 ) -> None:
     st.markdown('<span class="step-badge">2단계 · AI 해석</span>', unsafe_allow_html=True)
+
+    # ── 사업 개요 & 섹터 트렌드 ──────────────────
+    if business_sector_info:
+        st.subheader("🏢 사업 개요 & 섹터 트렌드")
+
+        biz_summary   = business_sector_info.get("business_summary", "")
+        main_products = business_sector_info.get("main_products", [])
+        revenue_model = business_sector_info.get("revenue_model", "")
+        dom_trend     = business_sector_info.get("domestic_trend", "보통")
+        dom_reason    = business_sector_info.get("domestic_reason", "")
+        glo_trend     = business_sector_info.get("global_trend", "보통")
+        glo_reason    = business_sector_info.get("global_reason", "")
+        catalysts     = business_sector_info.get("trend_catalysts", [])
+        trend_score   = business_sector_info.get("trend_score", 5)
+
+        # 트렌드 배지 색상
+        _trend_color = {"부각": "#2e7d32", "보통": "#f57c00", "소외": "#b71c1c"}
+        _trend_emoji = {"부각": "🔥", "보통": "📊", "소외": "❄️"}
+
+        # 사업 설명 카드
+        if biz_summary:
+            st.markdown(
+                f'<div class="card">{biz_summary}</div>',
+                unsafe_allow_html=True,
+            )
+
+        col_prod, col_rev = st.columns([3, 2])
+        with col_prod:
+            if main_products:
+                st.markdown("**주요 제품 · 서비스**")
+                for p in main_products:
+                    st.markdown(f"• {p}")
+        with col_rev:
+            if revenue_model:
+                st.markdown("**매출 구조**")
+                st.markdown(f"_{revenue_model}_")
+
+        st.markdown("---")
+
+        # 국내 / 글로벌 섹터 트렌드 나란히 표시
+        col_dom, col_glo, col_score = st.columns([2, 2, 1])
+        with col_dom:
+            dom_color = _trend_color.get(dom_trend, "#555")
+            dom_emoji = _trend_emoji.get(dom_trend, "📊")
+            st.markdown(
+                f"**🇰🇷 국내 섹터 동향**  "
+                f"<span style='color:{dom_color}; font-weight:700; font-size:1rem'>"
+                f"{dom_emoji} {dom_trend}</span>",
+                unsafe_allow_html=True,
+            )
+            if dom_reason:
+                st.caption(dom_reason)
+
+        with col_glo:
+            glo_color = _trend_color.get(glo_trend, "#555")
+            glo_emoji = _trend_emoji.get(glo_trend, "📊")
+            st.markdown(
+                f"**🌐 글로벌 섹터 동향**  "
+                f"<span style='color:{glo_color}; font-weight:700; font-size:1rem'>"
+                f"{glo_emoji} {glo_trend}</span>",
+                unsafe_allow_html=True,
+            )
+            if glo_reason:
+                st.caption(glo_reason)
+
+        with col_score:
+            score_clr = "#2e7d32" if trend_score >= 7 else ("#f57c00" if trend_score >= 4 else "#b71c1c")
+            st.markdown(
+                f"<div style='text-align:center; padding:0.6rem 0'>"
+                f"<div style='font-size:0.78rem; color:#555; margin-bottom:0.2rem'>섹터 열기</div>"
+                f"<div style='font-size:2.4rem; font-weight:800; color:{score_clr}'>{trend_score}</div>"
+                f"<div style='font-size:0.72rem; color:#777'>/10</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        if catalysts:
+            st.markdown("**⚡ 핵심 촉매**")
+            for c in catalysts:
+                st.markdown(f"• {c}")
+
+        st.markdown("---")
+
+    # ── 재무 분석 요약 ───────────────────────
     st.subheader("💬 재무 분석 요약")
     st.caption("퀀트 챔피언의 시각으로 쉽게 풀어드립니다")
 
@@ -1210,9 +1295,10 @@ def _collect_ticker_data(
     dca_results  = fetcher.calculate_dca_comparison(monthly_amount, dca_years)
     quant_result = scorer.calculate_score(metrics, peer_averages)
 
-    plain_summary   = ""
-    undervaluation  = {}
-    investment_data = {}
+    plain_summary       = ""
+    undervaluation      = {}
+    investment_data     = {}
+    business_sector_info: dict = {}
 
     if agent:
         _s(f"🤖 {company_name} AI 분석 중…")
@@ -1228,6 +1314,14 @@ def _collect_ticker_data(
         except Exception as e:
             plain_summary = _make_fallback_summary(metrics, profit_margins, company_name, sector)
             _s(f"⚠️ AI 요약 실패 ({e}) — 자동 요약으로 대체")
+
+        try:
+            business_sector_info = agent.analyze_business_and_sector_trend(
+                company_name, fetcher.ticker, sector, industry
+            )
+        except Exception as e:
+            business_sector_info = {}
+            _s(f"⚠️ 사업/섹터 분석 실패 ({e})")
 
         try:
             undervaluation = agent.analyze_undervaluation(
@@ -1255,21 +1349,22 @@ def _collect_ticker_data(
             investment_data = {"ai_score": 0, "score_reasoning": f"실패: {e}"}
 
     data: dict = {
-        "company_name":   company_name,
-        "sector":         sector,
-        "industry":       industry,
-        "currency":       currency,
-        "metrics":        metrics,
-        "financials":     financials,
-        "price_history":  price_history,
-        "profit_margins": profit_margins,
-        "peer_df":        peer_df,
-        "dca_results":    dca_results,
-        "plain_summary":  plain_summary,
-        "undervaluation": undervaluation,
-        "investment_data": investment_data,
-        "quant_result":   quant_result,
-        "image_data":     None,
+        "company_name":        company_name,
+        "sector":              sector,
+        "industry":            industry,
+        "currency":            currency,
+        "metrics":             metrics,
+        "financials":          financials,
+        "price_history":       price_history,
+        "profit_margins":      profit_margins,
+        "peer_df":             peer_df,
+        "dca_results":         dca_results,
+        "plain_summary":       plain_summary,
+        "undervaluation":      undervaluation,
+        "investment_data":     investment_data,
+        "business_sector_info": business_sector_info,
+        "quant_result":        quant_result,
+        "image_data":          None,
     }
 
     # 캐시 저장 (직렬화 가능한 키만 저장)
@@ -1293,21 +1388,22 @@ def _render_results(
     dca_years: int,
     cache_info: dict | None = None,
 ) -> None:
-    company_name   = data["company_name"]
-    sector         = data["sector"]
-    industry       = data["industry"]
-    currency       = data["currency"]
-    metrics        = data.get("metrics", {})
-    financials     = data.get("financials", pd.DataFrame())
-    price_history  = data.get("price_history", pd.DataFrame())
-    profit_margins = data.get("profit_margins", pd.Series(dtype=float))
-    peer_df        = data.get("peer_df", pd.DataFrame())
-    dca_results    = data.get("dca_results", {})
-    plain_summary   = data.get("plain_summary", "")
-    undervaluation  = data.get("undervaluation", {})
-    investment_data = data.get("investment_data", {})
-    quant_result    = data.get("quant_result", {})
-    image_data      = data.get("image_data")
+    company_name        = data["company_name"]
+    sector              = data["sector"]
+    industry            = data["industry"]
+    currency            = data["currency"]
+    metrics             = data.get("metrics", {})
+    financials          = data.get("financials", pd.DataFrame())
+    price_history       = data.get("price_history", pd.DataFrame())
+    profit_margins      = data.get("profit_margins", pd.Series(dtype=float))
+    peer_df             = data.get("peer_df", pd.DataFrame())
+    dca_results         = data.get("dca_results", {})
+    plain_summary       = data.get("plain_summary", "")
+    undervaluation      = data.get("undervaluation", {})
+    investment_data     = data.get("investment_data", {})
+    business_sector_info = data.get("business_sector_info", {})
+    quant_result        = data.get("quant_result", {})
+    image_data          = data.get("image_data")
 
     if cache_info:
         next_r = cache_info["next_refresh"]
@@ -1353,7 +1449,7 @@ def _render_results(
             company_name, image_data,
         )
     with tab2:
-        render_tab_ai_summary(plain_summary, metrics, bool(api_key))
+        render_tab_ai_summary(plain_summary, metrics, bool(api_key), business_sector_info)
     with tab3:
         render_tab_undervaluation(
             quant_result, undervaluation, peer_df, metrics, company_name, bool(api_key)
@@ -1682,9 +1778,10 @@ def run_analysis(cfg: dict) -> None:
     dca_results = fetcher.calculate_dca_comparison(monthly_amount, dca_years) if fetcher else {}
 
     # ── AI analysis ───────────────────────────
-    plain_summary = ""
-    undervaluation: dict = {}
-    investment_data: dict = {}
+    plain_summary           = ""
+    undervaluation: dict    = {}
+    investment_data: dict   = {}
+    business_sector_info: dict = {}
 
     if agent:
         progress.progress(65)
@@ -1707,7 +1804,17 @@ def run_analysis(cfg: dict) -> None:
             status.text(f"⚠️ AI 요약 실패 — 자동 요약으로 대체 ({e})")
 
         if fetcher:
-            progress.progress(75)
+            progress.progress(70)
+            status.text("🏢 사업 개요 & 섹터 트렌드 분석 중…")
+            try:
+                business_sector_info = agent.analyze_business_and_sector_trend(
+                    company_name, fetcher.ticker, sector, industry
+                )
+            except Exception as e:
+                business_sector_info = {}
+                status.text(f"⚠️ 사업/섹터 분석 실패 ({e})")
+
+            progress.progress(77)
             status.text("📈 저평가 분석 중…")
             try:
                 undervaluation = agent.analyze_undervaluation(
@@ -1749,21 +1856,22 @@ def run_analysis(cfg: dict) -> None:
     if fetcher:
         try:
             cache_manager.save(fetcher.ticker, {
-                "company_name":   company_name,
-                "sector":         sector,
-                "industry":       industry,
-                "currency":       currency,
-                "metrics":        metrics,
-                "financials":     financials,
-                "price_history":  price_history,
-                "profit_margins": profit_margins,
-                "peer_df":        peer_df,
-                "dca_results":    dca_results,
-                "plain_summary":  plain_summary,
-                "undervaluation": undervaluation,
-                "investment_data": investment_data,
-                "quant_result":   quant_result,
-                "image_data":     None,
+                "company_name":        company_name,
+                "sector":              sector,
+                "industry":            industry,
+                "currency":            currency,
+                "metrics":             metrics,
+                "financials":          financials,
+                "price_history":       price_history,
+                "profit_margins":      profit_margins,
+                "peer_df":             peer_df,
+                "dca_results":         dca_results,
+                "plain_summary":       plain_summary,
+                "undervaluation":      undervaluation,
+                "investment_data":     investment_data,
+                "business_sector_info": business_sector_info,
+                "quant_result":        quant_result,
+                "image_data":          None,
             })
         except Exception:
             pass  # 캐시 저장 실패는 비치명적
@@ -1771,21 +1879,22 @@ def run_analysis(cfg: dict) -> None:
     # ── 결과 렌더링 ───────────────────────────
     _render_results(
         data={
-            "company_name":   company_name,
-            "sector":         sector,
-            "industry":       industry,
-            "currency":       currency,
-            "metrics":        metrics,
-            "financials":     financials,
-            "price_history":  price_history,
-            "profit_margins": profit_margins,
-            "peer_df":        peer_df,
-            "dca_results":    dca_results,
-            "plain_summary":  plain_summary,
-            "undervaluation": undervaluation,
-            "investment_data": investment_data,
-            "quant_result":   quant_result,
-            "image_data":     image_data,
+            "company_name":        company_name,
+            "sector":              sector,
+            "industry":            industry,
+            "currency":            currency,
+            "metrics":             metrics,
+            "financials":          financials,
+            "price_history":       price_history,
+            "profit_margins":      profit_margins,
+            "peer_df":             peer_df,
+            "dca_results":         dca_results,
+            "plain_summary":       plain_summary,
+            "undervaluation":      undervaluation,
+            "investment_data":     investment_data,
+            "business_sector_info": business_sector_info,
+            "quant_result":        quant_result,
+            "image_data":          image_data,
         },
         api_key=api_key,
         monthly_amount=monthly_amount,
